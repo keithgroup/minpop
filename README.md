@@ -47,7 +47,7 @@ Version 2 extends it beyond what Gaussian offers:
 ## 2. Installation
 
 ```bash
-git clone https://github.com/BLZ11/minpop.git
+git clone https://github.com/keithgroup/minpop.git
 cd minpop
 pip install .            # or: pip install -e .   (editable; needs pip >= 21.3)
 ```

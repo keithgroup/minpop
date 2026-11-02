@@ -22,7 +22,7 @@ gvb = ["gvbpp @ git+https://github.com/keithgroup/gvbpp.git"]
 test = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/BLZ11/minpop"
+Homepage = "https://github.com/keithgroup/minpop"
 
 [project.scripts]
 minpop-rohf  = "minpop.minpop_rohf:main"

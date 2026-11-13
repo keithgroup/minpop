@@ -33,7 +33,7 @@ Every quantity carries its own shape and units, and matrices are stored whole
 record round-trips to the exact float values Gaussian printed.
 
     {
-      "schema": "minpop-record", "schema_version": "1.0",
+      "schema": "minpop-record", "schema_version": "1.2",
       "source":   {file, sha256, code, parsed_utc},
       "system":   {id, reaction, point, charge, multiplicity, natoms, nelectrons},
       "method":   {name, basis, guess_mix, stable_opt},
@@ -44,8 +44,31 @@ record round-trips to the exact float values Gaussian printed.
                    n_alpha, n_beta},
       "mbs":      {basis_function_labels, gross, density_alpha, density_beta,
                    population_full, condensed_to_atoms, atomic_spin_densities,
-                   mulliken, mulliken_sum}
+                   mulliken, mulliken_sum},
+      "projection": {minimal_basis, completeness: [{label, captured, total, leak,
+                   leak_percent, least_captured_mo, least_captured_percent,
+                   n_mo_below_99}]},
+      "symmetry": {classes, condensed_to_atoms: {sigma, pi, delta, phi},
+                   atomic_spin_densities: {...} | null,
+                   shells: {labels, atoms, all_electrons: {...}, spin_density: {...}} | null},
+      "gvb":      {energy_hartree, e_corr_hartree, n_core, n_pairs, n_open,
+                   n_natural_orbitals, n_projected, search_window, trials: [...],
+                   pairs: [{pair, n_bond, n_corr, s_ab, corr_no, independent_fraction,
+                            on, kind, atoms, gross_a, gross_b, mbs_bond_population,
+                            symmetry}]} | null,
+      "warnings": [...]
     }
+
+Schema history
+--------------
+1.2  Everything the report prints is now in the record. Added: source.command_line;
+     method.{label, xc, grid_level, basis_full, basis_heavy, basis_light, spherical,
+     ecp, hamiltonian, minimal_basis}; scf.{s2, two_s_plus_one, n_doubly, n_singly};
+     top-level projection, symmetry, gvb, warnings. method.name now also reports
+     rks, uks and gvbpp. geometry.atomic_symbols covers the whole periodic table.
+     Additive: every 1.1 key keeps its meaning.
+1.1  JSON Lines datasets, long CSV.
+1.0  First release.
 
 Usage
 -----
@@ -77,13 +100,13 @@ from pathlib import Path
 import numpy as np
 
 SCHEMA = "minpop-record"
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
-_Z2SYM = {
-    1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
-    9: "F", 10: "Ne", 11: "Na", 12: "Mg", 13: "Al", 14: "Si", 15: "P",
-    16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca", 35: "Br", 53: "I",
-}
+_SYMBOLS = ("H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn "
+            "Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce "
+            "Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn "
+            "Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr").split()
+_Z2SYM = {i + 1: s for i, s in enumerate(_SYMBOLS)}
 
 
 # --------------------------------------------------------------------------- #
@@ -466,6 +489,284 @@ def _unarr(d):
     return np.asarray(d["data"], dtype=float).reshape(d["shape"])
 
 
+
+# --------------------------------------------------------------------------- #
+# schema 1.2: everything else the report prints
+# --------------------------------------------------------------------------- #
+_GREEK = {"\u03c3": "sigma", "\u03c0": "pi", "\u03b4": "delta", "\u03c6": "phi"}
+_CLASSES = ("sigma", "pi", "delta", "phi")
+_BANNER = re.compile(r"^MinPop Analysis \(([^)]*)\)", re.M)
+_METHOD_FROM_BANNER = {"UHF": "uhf", "ROHF": "rohf", "UKS KS-DFT": "uks",
+                       "RKS KS-DFT": "rks", "GVB-PP": "gvbpp"}
+
+
+def parse_method_label(text):
+    """('uks', 'UKS KS-DFT') from the 'MinPop Analysis (...)' banner, else (None, None)."""
+    m = _BANNER.findall(text)
+    if not m:
+        return None, None
+    return _METHOD_FROM_BANNER.get(m[-1].strip()), m[-1].strip()
+
+
+def parse_method_details(text):
+    """Basis label (incl. mixed bases), ECP, Hamiltonian, KS functional, minimal basis."""
+    d = {"basis_full": None, "basis_heavy": None, "basis_light": None,
+         "light_max_z": None, "spherical": None, "ecp": None, "hamiltonian": None,
+         "xc": None, "grid_level": None, "minimal_basis": None, "scf_solver": None}
+    m = re.search(r"^Basis:\s*(.+?)\s*(?:\((5D/7F spherical|6D/10F cartesian)[^)]*\))?\s*$",
+                  text, re.M)
+    if m:
+        d["basis_full"] = m.group(1).strip()
+        if m.group(2):
+            d["spherical"] = m.group(2).startswith("5D")
+        mm = re.match(r"(.+?) on Z>(\d+),\s*(.+?) on Z<=\d+$", d["basis_full"])
+        if mm:
+            d["basis_heavy"], d["light_max_z"], d["basis_light"] = (
+                mm.group(1), int(mm.group(2)), mm.group(3))
+    m = re.search(r"Auto-detected ECP for heavy elements:\s*(\{.*\})", text)
+    if m:
+        try:
+            import ast
+            d["ecp"] = ast.literal_eval(m.group(1))
+        except Exception:
+            d["ecp"] = m.group(1)
+    m = re.search(r"^Hamiltonian:\s*(.+)$", text, re.M)
+    if m:
+        s = m.group(1).strip()
+        d["hamiltonian"] = {"text": s, "x2c": "X2C" in s, "atomic_decoupling": "atomic" in s}
+    else:
+        d["hamiltonian"] = {"text": "non-relativistic" + (" with ECP" if d["ecp"] else ""),
+                            "x2c": False, "atomic_decoupling": False}
+    m = re.search(r"^KS-DFT:\s*\S+\s+xc=(\S+)\s+grid level=(\S+)", text, re.M)
+    if m:
+        d["xc"] = m.group(1)
+        d["grid_level"] = int(m.group(2)) if m.group(2).isdigit() else m.group(2)
+    m = re.findall(r"Minimal-basis projection:\s*(.+)$", text, re.M)
+    if m:
+        d["minimal_basis"] = m[-1].strip()
+    if re.search(r"second-order \(Newton\) solver from the start", text):
+        d["scf_solver"] = "newton"
+    elif re.search(r"retrying with the second-order \(Newton\) solver", text):
+        d["scf_solver"] = "diis, then newton"
+    return d
+
+
+def parse_pyscf_s2(text):
+    """(<S^2>, 2S+1) from the last PySCF 'converged SCF energy = ... <S^2> = ...' line."""
+    m = re.findall(r"<S\^2>\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+2S\+1\s*=\s*"
+                   r"(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", text)
+    return (float(m[-1][0]), float(m[-1][1])) if m else (None, None)
+
+
+def parse_rohf_structure(text):
+    """'ROHF orbital structure: 5 doubly occupied, 0 singly occupied' -> (5, 0)."""
+    m = re.findall(r"orbital structure:\s*(\d+)\s*doubly occupied,\s*(\d+)\s*singly occupied",
+                   text)
+    return (int(m[-1][0]), int(m[-1][1])) if m else (None, None)
+
+
+_RE_COMPLETE = re.compile(
+    r"Projection completeness \(([^)]*)\):\s*(-?\d+\.\d+) of (-?\d+(?:\.\d+)?) electrons "
+    r"captured, leak (-?\d+\.\d+) \((-?\d+\.\d+)%\); least-captured MO #(\d+) at "
+    r"(-?\d+\.\d+)%, (\d+) MOs below 99%")
+
+
+def parse_projection(text):
+    """Minimal-basis tag and the 'Projection completeness' lines (last occurrence per label)."""
+    tag = re.findall(r"Minimal-basis projection:\s*(.+)$", text, re.M)
+    rows = {}
+    for m in _RE_COMPLETE.finditer(text):
+        label = m.group(1).strip()
+        rows[label] = {"label": label, "captured": float(m.group(2)),
+                       "total": float(m.group(3)), "leak": float(m.group(4)),
+                       "leak_percent": float(m.group(5)),
+                       "least_captured_mo": int(m.group(6)),
+                       "least_captured_percent": float(m.group(7)),
+                       "n_mo_below_99": int(m.group(8))}
+    if not tag and not rows:
+        return None
+    return {"minimal_basis": tag[-1].strip() if tag else None,
+            "completeness": list(rows.values())}
+
+
+def _labelled_matrix(lines, start):
+    """A blocked matrix whose rows carry '[atom] [elem] label' (shell or AO matrices).
+    Returns (matrix, labels, atoms) with the atom index carried forward."""
+    M, _ = _read_blocked_matrix(lines, start)
+    if M is None:
+        return None, None, None
+    labels, atoms, cur = {}, {}, None
+    i = start
+    while i < len(lines):
+        toks = lines[i].split()
+        if not toks:
+            break
+        if _is_col_header(toks):
+            i += 1
+            continue
+        if not _INT.match(toks[0]):
+            break
+        r = int(toks[0]) - 1
+        rest = [x for x in toks[1:] if not _FLT.match(x)]
+        if len(rest) >= 3 and _INT.match(rest[0]):       # '1 C 1S'
+            cur = int(rest[0])
+            lab = rest[2]
+        elif rest:
+            lab = rest[-1]
+        else:
+            lab = None
+        if r not in labels:
+            labels[r], atoms[r] = lab, cur
+        i += 1
+    n = M.shape[0]
+    return _symmetrize(M), [labels.get(k) for k in range(n)], [atoms.get(k) for k in range(n)]
+
+
+def parse_symmetry(text, natoms=None):
+    """
+    The sigma/pi/delta/phi section printed with -symmetry / -symmetry-shells.
+
+    Returns None when the report has no such section, else
+      {'classes': [...],
+       'condensed_to_atoms': {cls: matrix},            always present
+       'atomic_spin_densities': {cls: matrix} | None,  None when the spin density is zero
+       'below_threshold': {'condensed_to_atoms': [...], 'atomic_spin_densities': [...]},
+       'shells': {'labels', 'atoms', 'all_electrons': {cls: matrix},
+                  'spin_density': {cls: matrix} | None} | None}
+    A class printed as 'all entries below 1e-6' is stored as a zero matrix and
+    listed under below_threshold.
+    """
+    if "MBS bond populations resolved by symmetry" not in text:
+        return None
+    lines = text.splitlines()
+    start = _find(lines, r"MBS bond populations resolved by symmetry")
+    lines = lines[start:]
+    out = {"classes": list(_CLASSES), "below_threshold": {}}
+    n = natoms
+    for key, what in (("condensed_to_atoms", r"Condensed to atoms \(all electrons\)"),
+                      ("atomic_spin_densities", r"Atomic-Atomic Spin Densities")):
+        mats, below = {}, []
+        for g, cls in _GREEK.items():
+            i = _find(lines, rf"MBS {g} {what}")
+            if i is None:
+                continue
+            if "below" in lines[i] or "none" in lines[i]:
+                mats[cls] = None
+                below.append(cls)
+            else:
+                M, _ = _read_blocked_matrix(lines, i + 1)
+                mats[cls] = _symmetrize(M)
+                n = n or M.shape[0]
+        if not mats:
+            out[key] = None
+            continue
+        for cls in mats:
+            if mats[cls] is None:
+                mats[cls] = np.zeros((n, n)) if n else None
+        out[key] = mats
+        out["below_threshold"][key] = below
+    if any("Spin density is zero" in ln for ln in lines):
+        out["atomic_spin_densities"] = None
+        out["spin_density_zero"] = True
+    shells = {"labels": None, "atoms": None, "all_electrons": {}, "spin_density": {}}
+    for g, cls in _GREEK.items():
+        for key, what in (("all_electrons", r"\(all electrons\)"), ("spin_density", r"\(spin density\)")):
+            i = _find(lines, rf"^\s*{g} bond populations condensed to shells {what}")
+            if i is None:
+                continue
+            M, labs, atoms = _labelled_matrix(lines, i + 1)
+            if M is not None:
+                shells[key][cls] = M
+                shells["labels"], shells["atoms"] = labs, atoms
+    if shells["labels"] is None:
+        out["shells"] = None
+    else:
+        nsh = len(shells["labels"])
+        for key in ("all_electrons", "spin_density"):
+            if shells[key]:
+                for cls in _CLASSES:
+                    shells[key].setdefault(cls, np.zeros((nsh, nsh)))
+            else:
+                shells[key] = None
+        out["shells"] = shells
+    return out
+
+
+def parse_gvb(text):
+    """The GVB-PP block of minpop_gvbpp.py reports, or None."""
+    if "MinPop Analysis (GVB-PP)" not in text and "converged GVB-PP energy" not in text:
+        return None
+    g = {"energy_hartree": None, "e_corr_hartree": None, "n_core": None, "n_pairs": None,
+         "n_open": None, "n_natural_orbitals": None, "n_projected": None,
+         "search_window": None, "guess": None, "n_trials": None, "trials": [], "pairs": [],
+         "core_like_warning": "pair(s)" in text and "are core-like" in text}
+    m = re.findall(r"GVB-PP energy\s*=\s*(-?\d+\.\d+)\s+E_corr\s*=\s*(-?\d+\.\d+)", text)
+    if m:
+        g["energy_hartree"], g["e_corr_hartree"] = float(m[-1][0]), float(m[-1][1])
+    else:
+        m = re.findall(r"converged GVB-PP energy\s*=\s*(-?\d+\.\d+)", text)
+        if m:
+            g["energy_hartree"] = float(m[-1])
+    m = re.search(r"GVB-PP orbital structure:\s*(\d+) core,\s*(\d+) pairs,\s*(\d+) open-shell "
+                  r"orbitals;\s*(\d+) of (\d+) natural orbitals projected", text)
+    if m:
+        (g["n_core"], g["n_pairs"], g["n_open"], g["n_projected"],
+         g["n_natural_orbitals"]) = (int(x) for x in m.groups())
+    m = re.search(r"GVB-PP pair search window:\s*(\d+)", text)
+    if m:
+        g["search_window"] = int(m.group(1))
+    m = re.search(r"^GVB-PP:\s*(\d+) pairs,\s*guess=(\S+?),\s*trials=(\d+)", text, re.M)
+    if m:
+        g["guess"], g["n_trials"] = m.group(2), int(m.group(3))
+    for m in re.finditer(r"^\s*(?:GVB-PP )?guess=(\S+)\s+E\s*=\s*(-?\d+\.\d+)\s+converged\s*=\s*(\w+)",
+                         text, re.M):
+        g["trials"].append({"guess": m.group(1), "energy_hartree": float(m.group(2)),
+                            "converged": m.group(3) == "True"})
+    lines = text.splitlines()
+    i = _find(lines, r"^\s*GVB-PP pairs:")
+    if i is not None:
+        row = re.compile(
+            r"^\s*(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(kept|merged)\s+(\d+)%\s+"
+            r"(\S+(?:\s+(?:lone pair|core-like))?)\s+(-?\d+\.\d+)"
+            r"(?:\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*(\S+)?)?\s*$")
+        for ln in lines[i + 2:]:
+            m = row.match(ln)
+            if not m:
+                if ln.strip().startswith("corr NO") or not ln.strip():
+                    break
+                continue
+            on = m.group(7).strip()
+            if on.endswith("lone pair") or on.endswith("core-like"):
+                kind = "lone pair" if on.endswith("lone pair") else "core-like"
+                atoms = [on.split()[0]]
+            else:
+                kind, atoms = "bond", on.split("-")
+            g["pairs"].append({
+                "pair": int(m.group(1)), "n_bond": float(m.group(2)),
+                "n_corr": float(m.group(3)), "s_ab": float(m.group(4)),
+                "corr_no": m.group(5), "independent_fraction": int(m.group(6)) / 100.0,
+                "on": on, "kind": kind, "atoms": atoms, "gross_a": float(m.group(8)),
+                "gross_b": float(m.group(9)) if m.group(9) else None,
+                "mbs_bond_population": float(m.group(10)) if m.group(10) else None,
+                "symmetry": _GREEK.get(m.group(11), m.group(11)) if m.group(11) else None})
+    return g
+
+
+def parse_warnings(text):
+    """Every WARN / WARNING line of the report, in order, de-duplicated."""
+    seen, out = set(), []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s.startswith("WARN") or s.startswith("WARNING"):
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
+
+def _arr_dict(d, units="electrons"):
+    return None if d is None else {k: _arr(v, units=units) for k, v in d.items()}
+
 # --------------------------------------------------------------------------- #
 # build a record
 # --------------------------------------------------------------------------- #
@@ -498,7 +799,14 @@ def build_record_from_text(text, source=None, xyz_dirs=None,
     hdr = _parse_header(text)
     mbs = parse_mbs(text)
     n_alpha, n_beta = _parse_orbital_structure(text)
+    n_doubly, n_singly = parse_rohf_structure(text)
+    if n_alpha is None and n_doubly is not None:
+        n_alpha, n_beta = n_doubly + n_singly, n_doubly
     sysid, rxn, point = _parse_id(source) if source else (None, None, None)
+    banner_method, banner_label = parse_method_label(text)
+    details = parse_method_details(text)
+    s2_pyscf, two_s1 = parse_pyscf_s2(text)
+    cmd = re.search(r"^Command line:\s*(.+)$", text, re.M)
 
     # Both orientations. Gaussian does not reorder atoms between the input and
     # standard frames, so the atom list is shared; we verify that and flag it.
@@ -534,6 +842,7 @@ def build_record_from_text(text, source=None, xyz_dirs=None,
             "sha256": _sha256_text(text),      # hash of the MinPop printout
             "code": _detect_code(text),
             "parsed_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "command_line": cmd.group(1).strip() if cmd else None,
         },
         "system": {
             "id": sysid,
@@ -546,8 +855,20 @@ def build_record_from_text(text, source=None, xyz_dirs=None,
             "nelectrons": hdr["nelectrons"],
         },
         "method": {
-            "name": detect_method(text),
+            "name": banner_method or detect_method(text),
+            "label": banner_label,
             "basis": hdr["basis"],
+            "basis_full": details["basis_full"],
+            "basis_heavy": details["basis_heavy"],
+            "basis_light": details["basis_light"],
+            "light_max_z": details["light_max_z"],
+            "spherical": details["spherical"],
+            "ecp": details["ecp"],
+            "hamiltonian": details["hamiltonian"],
+            "xc": details["xc"],
+            "grid_level": details["grid_level"],
+            "minimal_basis": details["minimal_basis"],
+            "scf_solver": details["scf_solver"],
             "guess_mix": "Guess=Mix" in text,
             "stable_opt": "stability analysis" in text.lower(),
         },
@@ -565,8 +886,12 @@ def build_record_from_text(text, source=None, xyz_dirs=None,
             "energy_hartree": mbs["escf"],
             "s2_before_annihilation": mbs["s2_before"],
             "s2_after_annihilation": mbs["s2_after"],
+            "s2": s2_pyscf,
+            "two_s_plus_one": two_s1,
             "n_alpha": n_alpha,
             "n_beta": n_beta,
+            "n_doubly": n_doubly,
+            "n_singly": n_singly,
         },
         "mbs": {
             "basis_function_labels": mbs["gross_labels"],
@@ -585,6 +910,31 @@ def build_record_from_text(text, source=None, xyz_dirs=None,
                                        if len(mbs["musum"]) > 1 else None)}),
         },
     }
+    # ---- schema 1.2 blocks ------------------------------------------------
+    rec["projection"] = parse_projection(text)
+    sym = parse_symmetry(text, natoms=natoms)
+    if sym is not None:
+        sh = sym["shells"]
+        rec["symmetry"] = {
+            "classes": sym["classes"],
+            "condensed_to_atoms": _arr_dict(sym["condensed_to_atoms"]),
+            "atomic_spin_densities": _arr_dict(sym["atomic_spin_densities"]),
+            "below_threshold": sym["below_threshold"],
+            "spin_density_zero": bool(sym.get("spin_density_zero", False)),
+            "shells": None if sh is None else {
+                "labels": sh["labels"], "atoms": sh["atoms"],
+                "all_electrons": _arr_dict(sh["all_electrons"]),
+                "spin_density": _arr_dict(sh["spin_density"])},
+        }
+    else:
+        rec["symmetry"] = None
+    rec["gvb"] = parse_gvb(text)
+    g = rec["gvb"]
+    if g and g["n_core"] is not None and rec["scf"]["n_alpha"] is None:
+        rec["scf"]["n_alpha"] = g["n_core"] + g["n_pairs"] + g["n_open"]
+        rec["scf"]["n_beta"] = g["n_core"] + g["n_pairs"]
+    rec["warnings"] = parse_warnings(text)
+
     # trim column labels to the columns actually present (ROHF prints no spin
     # column in some blocks, and the gross block can be Total-only)
     for _name in ("gross", "mulliken"):
@@ -635,10 +985,21 @@ def load_record(path, as_arrays=True):
     with _open_r(path) as fh:
         rec = json.load(fh)
     if as_arrays:
-        for k, v in rec.get("mbs", {}).items():
-            if isinstance(v, dict) and "shape" in v:
-                v["data"] = _unarr(v)
+        _revive(rec)
     return rec
+
+
+def _revive(node):
+    """Turn every {'shape', 'data'} block, at any depth, into a numpy array in place."""
+    if isinstance(node, dict):
+        if "shape" in node and "data" in node:
+            node["data"] = _unarr(node)
+            return
+        for v in node.values():
+            _revive(v)
+    elif isinstance(node, list):
+        for v in node:
+            _revive(v)
 
 
 def write_jsonl(recs, path):
@@ -659,9 +1020,7 @@ def iter_jsonl(path, as_arrays=False):
                 continue
             rec = json.loads(line)
             if as_arrays:
-                for k, v in rec.get("mbs", {}).items():
-                    if isinstance(v, dict) and "shape" in v:
-                        v["data"] = _unarr(v)
+                _revive(rec)
             yield rec
 
 
@@ -737,7 +1096,7 @@ def _parse_for_csv(text, source=None):
     return {
         "file": Path(source).name if source else None,
         "system_id": sysid, "reaction": rxn, "point": point,
-        "method": detect_method(text), "basis": hdr["basis"],
+        "basis": hdr["basis"],
         "charge": hdr["charge"], "multiplicity": hdr["multiplicity"],
         "natoms": hdr["natoms"] or (max(atom_elems) if atom_elems else None),
         "nelectrons": hdr["nelectrons"],
@@ -749,6 +1108,12 @@ def _parse_for_csv(text, source=None):
         "atom_elems": atom_elems,
         "da": mbs["da"], "db": mbs["db"], "pt": mbs["pt"],
         "cond": mbs["cond"], "spinmat": mbs["spin"], "musp": mbs["musp"],
+        # schema 1.2 quantities
+        "method": parse_method_label(text)[0] or detect_method(text),
+        "projection": parse_projection(text),
+        "symmetry": parse_symmetry(text, natoms=hdr["natoms"]),
+        "gvb": parse_gvb(text),
+        "s2": parse_pyscf_s2(text)[0],
     }
 
 
@@ -820,6 +1185,71 @@ def long_rows(p, sparse_tol=0.0):
                 if abs(v) > sparse_tol:
                     yield row(cols[c], v, i=i + 1, atom_i=i + 1,
                               elem_i=ae.get(i + 1, ""))
+
+    # ---- schema 1.2 quantities ------------------------------------------
+    if p.get("s2") is not None:
+        yield row("s2", p["s2"])
+    proj = p.get("projection")
+    if proj:
+        for k, c in enumerate(proj["completeness"], start=1):
+            tag = re.sub(r"[^a-z]+", "_", c["label"].lower()).strip("_")
+            for name in ("captured", "total", "leak", "leak_percent",
+                         "least_captured_mo", "least_captured_percent", "n_mo_below_99"):
+                yield row(f"projection_{name}_{tag}", c[name], i=k)
+    sym = p.get("symmetry")
+    if sym:
+        for key, qbase in (("condensed_to_atoms", "symmetry_{c}_condensed_to_atoms"),
+                           ("atomic_spin_densities", "symmetry_{c}_atomic_spin_densities")):
+            mats = sym.get(key)
+            if not mats:
+                continue
+            for c, M in mats.items():
+                if M is None:
+                    continue
+                n = M.shape[0]
+                for i in range(n):
+                    for j in range(i + 1, n):          # off-diagonal: bonds only
+                        v = M[i, j]
+                        if abs(v) > sparse_tol:
+                            yield row(qbase.format(c=c), v, i=i + 1, j=j + 1,
+                                      atom_i=i + 1, atom_j=j + 1,
+                                      elem_i=ae.get(i + 1, ""), elem_j=ae.get(j + 1, ""))
+        sh = sym.get("shells")
+        if sh:
+            slab, satom = sh["labels"], sh["atoms"]
+            for key, qbase in (("all_electrons", "symmetry_{c}_shells"),
+                               ("spin_density", "symmetry_{c}_shells_spin")):
+                mats = sh.get(key)
+                if not mats:
+                    continue
+                for c, M in mats.items():
+                    n = M.shape[0]
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            v = M[i, j]
+                            if abs(v) > sparse_tol:
+                                yield row(qbase.format(c=c), v, i=i + 1, j=j + 1,
+                                          ao_i=slab[i], ao_j=slab[j],
+                                          atom_i=satom[i], atom_j=satom[j],
+                                          elem_i=ae.get(satom[i], ""),
+                                          elem_j=ae.get(satom[j], ""))
+    g = p.get("gvb")
+    if g:
+        for name in ("energy_hartree", "e_corr_hartree"):
+            if g.get(name) is not None:
+                yield row("gvb_" + name, g[name])
+        for name in ("n_core", "n_pairs", "n_open", "n_natural_orbitals", "n_projected",
+                     "search_window"):
+            if g.get(name) is not None:
+                yield row("gvb_" + name, g[name])
+        for k, tr in enumerate(g["trials"], start=1):
+            yield row("gvb_trial_energy_hartree", tr["energy_hartree"], i=k, ao_i=tr["guess"])
+        for pr in g["pairs"]:
+            for name in ("n_bond", "n_corr", "s_ab", "independent_fraction", "gross_a",
+                         "gross_b", "mbs_bond_population"):
+                if pr.get(name) is not None:
+                    yield row("gvb_pair_" + name, pr[name], i=pr["pair"],
+                              ao_i=pr["on"], ao_j=pr.get("symmetry") or "")
 
 
 def write_long_csv(parsed_runs, path, sparse_tol=0.0):

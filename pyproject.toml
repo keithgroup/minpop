@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minpop"
-version = "2.0.0"
+version = "2.1.0"
 description = "Minimal-basis (MBS) Mulliken population analysis in PySCF: HF, DFT and GVB-PP references, ANO-RCC-MB for the whole periodic table, sigma/pi/delta/phi bond populations"
 readme = "README.md"
 license = { file = "LICENSE" }

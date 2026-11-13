@@ -252,6 +252,20 @@ def minpop_gvbpp(g, minimal_basis='sto-3g', keep_tol=0.5, azimuthal_gauge=True,
     C_min, occ_kept, kept, report = project_natural_orbitals(
         nos, occ, kinds, pair_of, S_cross, S_min, keep_tol=keep_tol)
     kinds_kept = [kinds[i] for i in kept]
+    if verbose:
+        # Occupation-weighted share of the GVB-PP density inside the minimal-basis
+        # span, in the same line format as the HF/KS drivers so it parses alike.
+        C_raw = np.linalg.solve(S_min, S_cross @ nos)
+        frac = np.einsum('ai,ab,bi->i', C_raw, S_min, C_raw)       # captured fraction per NO
+        n_el = float(occ.sum())
+        captured = float((occ * frac).sum())
+        strong = np.where(occ >= 0.5)[0]                           # core, bonding, open
+        worst = strong[np.argmin(frac[strong])]
+        leak = n_el - captured
+        print(f" Projection completeness (natural orbitals, occupation-weighted): "
+              f"{captured:.5f} of {n_el:.0f} electrons captured, leak {leak:.5f} "
+              f"({100.0 * leak / n_el:.3f}%); least-captured MO #{worst + 1} at "
+              f"{100.0 * frac[worst]:.2f}%, {int((frac[strong] < 0.99).sum())} MOs below 99%")
     pair_kept = [pair_of[i] for i in kept]
 
     # --- densities: pairs and core split evenly, open shells alpha only ---
@@ -527,29 +541,46 @@ def main():
                    help="Highest doubly occupied orbitals searched for pairs "
                         "(default: valence orbitals only, semicore excluded)")
     p.add_argument("-gvb-verbose", dest="gvb_verbose", type=int, default=0)
+    p.add_argument("-json", dest="json_path", metavar="PATH", default=None,
+                   help="Also serialize this run to a JSON record (schema 1.2) via "
+                        "minpop_json_csv.py; a failed export never fails the run")
+    p.add_argument("-json-xyz-dir", dest="json_xyz_dir", action="append", metavar="DIR",
+                   default=None, help="Directory with the input .xyz (repeatable)")
+    p.add_argument("-csv-long", dest="csv_long", metavar="PATH", default=None,
+                   help="Also write the tidy sparse CSV of every printed quantity")
+    p.add_argument("-csv-sparse-tol", dest="csv_sparse_tol", type=float, default=0.0)
     args = p.parse_args()
 
     R.LABEL_STYLE = args.label_style
     R.MBS_LIGHT_MAX_Z = args.light_max_z
     R.BOND_SYMMETRY = args.symmetry or args.symmetry_shells
     R.BOND_SYMMETRY_SHELLS = args.symmetry_shells
-    print("Command line: python " + " ".join(sys.argv))
-    try:
-        run_gvbpp_from_xyz(args.xyz_file, args.n_pairs, charge=args.charge,
-                           multiplicity=args.mult, basis=args.basis, ecp=args.ecp,
-                           basis_dir=args.basis_dir,
-                           standard_orientation=args.standard_orientation,
-                           azimuthal_gauge=args.azimuthal_gauge, guess=args.guess,
-                           max_cycle=args.max_cycle, soscf=args.soscf, x2c=args.x2c,
-                           minimal_basis=args.minimal_basis, keep_tol=args.keep_tol,
-                           gvb_guess=args.gvb_guess, gvb_trials=args.gvb_trials,
-                           gvb_verbose=args.gvb_verbose, gvb_window=args.gvb_window,
-                           gvb_seed=args.gvb_seed, basis_light=args.basis_light,
-                           light_max_z=args.light_max_z, x2c_atomic=args.x2c_atomic)
-    except R.MinPopSCFError as e:
-        print(f"MinPop ERROR: {e}")
+    import contextlib
+    exporting = bool(args.json_path or args.csv_long)
+    ctx = R._capture_report() if exporting else contextlib.nullcontext()
+    failure = None
+    with ctx as buf:
+        print("Command line: python " + " ".join(sys.argv))
+        try:
+            run_gvbpp_from_xyz(args.xyz_file, args.n_pairs, charge=args.charge,
+                               multiplicity=args.mult, basis=args.basis, ecp=args.ecp,
+                               basis_dir=args.basis_dir,
+                               standard_orientation=args.standard_orientation,
+                               azimuthal_gauge=args.azimuthal_gauge, guess=args.guess,
+                               max_cycle=args.max_cycle, soscf=args.soscf, x2c=args.x2c,
+                               minimal_basis=args.minimal_basis, keep_tol=args.keep_tol,
+                               gvb_guess=args.gvb_guess, gvb_trials=args.gvb_trials,
+                               gvb_verbose=args.gvb_verbose, gvb_window=args.gvb_window,
+                               gvb_seed=args.gvb_seed, basis_light=args.basis_light,
+                               light_max_z=args.light_max_z, x2c_atomic=args.x2c_atomic)
+        except R.MinPopSCFError as e:
+            print(f"MinPop ERROR: {e}")
+            failure = e
+        text = buf.getvalue() if exporting else None
+    if exporting and failure is None:
+        R._export_outputs(text, args)
+    if failure is not None:
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

@@ -104,3 +104,96 @@ def test_ano_rcc_mb_occ_shells():
     assert MB_OCC_COUNTS["Rh"] == (5, 3, 2) and MB_COUNTS["Rh"] == (5, 4, 2)
     assert MB_OCC_COUNTS["Fe"] == (4, 2, 1) and MB_OCC_COUNTS["Ga"] == (4, 3, 1)
     assert MB_OCC_COUNTS["Pt"] == (6, 4, 3, 1) and MB_OCC_COUNTS["C"] == (2, 1)
+
+
+# ---------------------------------------------------------------------------
+# JSON schema 1.2: the record carries everything the report prints
+# ---------------------------------------------------------------------------
+import json
+import re
+
+
+def _run_json(script, tmp_path, *args):
+    js = tmp_path / "rec.json"
+    cmd = [sys.executable, os.path.join(PKG, script), *args, "-json", str(js)]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
+    assert out.returncode == 0, out.stdout[-1500:] + out.stderr[-1500:]
+    return out.stdout, json.loads(js.read_text())
+
+
+def test_json_uhf_matches_report(tmp_path):
+    text, rec = _run_json("minpop_uhf.py", tmp_path, "-xyz", f"{XYZ}/ch2.xyz", "-mult", "3",
+                          "-basis", "6-31G", "-symmetry-shells")
+    assert rec["schema_version"] == "1.2"
+    assert rec["method"]["name"] == "uhf" and rec["method"]["label"] == "UHF"
+    assert rec["method"]["basis_full"] == "6-31G" and rec["method"]["spherical"] is True
+    assert rec["method"]["minimal_basis"].startswith("STO-3G")
+    assert rec["method"]["hamiltonian"]["x2c"] is False
+    assert "-symmetry-shells" in rec["source"]["command_line"]
+    # projection completeness: both spins, numbers as printed
+    comp = {c["label"]: c for c in rec["projection"]["completeness"]}
+    assert set(comp) == {"alpha", "beta"}
+    m = re.search(r"Projection completeness \(alpha\): ([\d.]+) of 5 electrons captured, leak ([\d.]+)", text)
+    assert np.isclose(comp["alpha"]["captured"], float(m.group(1)))
+    assert np.isclose(comp["alpha"]["leak"], float(m.group(2)))
+    # S^2 from PySCF and after annihilation
+    assert abs(rec["scf"]["s2"] - 2.0) < 0.05 and rec["scf"]["n_alpha"] == 5 and rec["scf"]["n_beta"] == 3
+    # symmetry: classes sum to the condensed matrices off the diagonal (print precision)
+    sym = rec["symmetry"]
+    off = ~np.eye(3, dtype=bool)
+    for key, tot_key in (("condensed_to_atoms", "condensed_to_atoms"),
+                         ("atomic_spin_densities", "atomic_spin_densities")):
+        tot = np.array(rec["mbs"][tot_key]["data"])
+        s = sum(np.array(sym[key][c]["data"]) for c in sym["classes"])
+        assert np.abs((s - tot)[off]).max() < 5e-6
+    assert sym["below_threshold"]["condensed_to_atoms"] == ["pi", "delta", "phi"]
+    sh = sym["shells"]
+    assert sh["labels"] == ["1S", "2S", "2P", "1S", "1S"] and sh["atoms"] == [1, 1, 1, 2, 3]
+    # shell matrix condenses to the atom matrix
+    S = np.array(sh["all_electrons"]["sigma"]["data"]); at = np.array(sh["atoms"])
+    A = np.array(sym["condensed_to_atoms"]["sigma"]["data"])
+    assert np.isclose(S[np.ix_(at == 1, at == 2)].sum(), A[0, 1], atol=5e-6)
+    assert rec["gvb"] is None and isinstance(rec["warnings"], list)
+
+
+def test_json_rohf_mixed_basis_x2c(tmp_path):
+    text, rec = _run_json("minpop_rohf.py", tmp_path, "-xyz", f"{XYZ}/pth.xyz", "-mult", "2",
+                          "-basis", "ano-rcc-vdzp", "-basis-light", "6-31G*", "-x2c-atomic",
+                          "-minimal-basis", "sto-3g-ano-occ", "-symmetry")
+    m = rec["method"]
+    assert m["basis_heavy"] == "ANO-RCC-VDZP" and m["basis_light"] == "6-31G*" and m["light_max_z"] == 18
+    assert m["hamiltonian"]["x2c"] and m["hamiltonian"]["atomic_decoupling"]
+    assert "ANO-RCC-MB-OCC" in m["minimal_basis"]
+    assert rec["scf"]["n_doubly"] == 39 and rec["scf"]["n_singly"] == 1
+    assert rec["geometry"]["atomic_symbols"] == ["Pt", "H"]
+    assert len(rec["projection"]["completeness"]) == 1
+    assert rec["symmetry"]["atomic_spin_densities"] is not None       # doublet: spin present
+
+
+def test_load_record_revives_nested_arrays(tmp_path):
+    sys.path.insert(0, PKG)
+    import minpop_json_csv as mj
+    _, rec = _run_json("minpop_uhf.py", tmp_path, "-xyz", f"{XYZ}/ch2.xyz", "-mult", "3",
+                       "-basis", "6-31G", "-symmetry")
+    r = mj.load_record(tmp_path / "rec.json")
+    assert isinstance(r["symmetry"]["condensed_to_atoms"]["sigma"]["data"], np.ndarray)
+    assert isinstance(r["mbs"]["density_alpha"]["data"], np.ndarray)
+
+
+@pytest.mark.skipif(__import__("importlib").util.find_spec("gvbpp") is None,
+                    reason="gvbpp not installed")
+def test_json_gvbpp(tmp_path):
+    text, rec = _run_json("minpop_gvbpp.py", tmp_path, "-xyz", f"{XYZ}/h2o.xyz", "-npairs", "4",
+                          "-basis", "cc-pvdz", "-symmetry")
+    g = rec["gvb"]
+    assert rec["method"]["name"] == "gvbpp" and g["n_pairs"] == 4 and g["n_core"] == 1
+    assert g["n_projected"] == 7 and g["n_natural_orbitals"] == 9 and len(g["pairs"]) == 4
+    kinds = sorted(p["kind"] for p in g["pairs"])
+    assert kinds == ["bond", "bond", "lone pair", "lone pair"]
+    bond = [p for p in g["pairs"] if p["kind"] == "bond"][0]
+    assert bond["symmetry"] == "sigma" and bond["corr_no"] == "kept" and bond["mbs_bond_population"] > 0.3
+    assert g["energy_hartree"] < rec["scf"]["energy_hartree"]          # correlation lowers E
+    assert len(g["trials"]) >= 2 and min(t["energy_hartree"] for t in g["trials"]) == pytest.approx(g["energy_hartree"], abs=1e-8)
+    assert rec["scf"]["n_alpha"] == 5 and rec["scf"]["n_beta"] == 5
+    assert rec["projection"]["completeness"][0]["label"].startswith("natural orbitals")

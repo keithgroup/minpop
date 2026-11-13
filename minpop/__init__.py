@@ -15,7 +15,7 @@ Modules:
 The heavy modules are imported lazily; `import minpop` is cheap.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __all__ = ["run_rohf_from_xyz", "run_uhf_from_xyz", "run_rks_from_xyz",
            "run_uks_from_xyz", "run_gvbpp_from_xyz", "bond_components",
            "class_matrices", "__version__"]

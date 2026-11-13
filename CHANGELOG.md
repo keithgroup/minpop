@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.1.0 (2026-11-13)
+
+Added
+- JSON schema 1.2 (`minpop_json_csv.py`): the record now holds everything the report prints. New: `source.command_line`; `method.{label, basis_full, basis_heavy, basis_light, light_max_z, spherical, ecp, hamiltonian, xc, grid_level, minimal_basis, scf_solver}`; `scf.{s2, two_s_plus_one, n_doubly, n_singly}`; top-level `projection` (completeness lines), `symmetry` (σ/π/δ/φ matrices condensed to atoms and shells, total and spin), `gvb` (energies, trials, pair table), `warnings`. `method.name` also reports `rks`, `uks`, `gvbpp`. Atomic symbols cover the whole periodic table. Additive over 1.1.
+- Long CSV carries the same new quantities (`projection_*`, `symmetry_*`, `gvb_*`, `s2`).
+- `load_record` / `iter_jsonl` revive arrays at any depth.
+- `minpop_gvbpp.py`: `-json`, `-json-xyz-dir`, `-csv-long`, `-csv-sparse-tol`; prints an occupation-weighted "Projection completeness (natural orbitals ...)" line.
+
+Changed
+- Repository moved to github.com/keithgroup/minpop.
+
 ## 2.0.0 (2026-10-27)
 
 Added

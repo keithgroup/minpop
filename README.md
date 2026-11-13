@@ -19,9 +19,10 @@
 7. [Choosing the minimal basis](#7-choosing-the-minimal-basis)
 8. [σ, π, δ, φ bond populations](#8-σ-π-δ-φ-bond-populations)
 9. [GVB-PP wavefunctions](#9-gvb-pp-wavefunctions)
-10. [Python API](#10-python-api)
-11. [Validation](#11-validation)
-12. [References](#12-references)
+10. [JSON and CSV export](#10-json-and-csv-export)
+11. [Python API](#11-python-api)
+12. [Validation](#12-validation)
+13. [References](#13-references)
 
 ---
 
@@ -144,7 +145,7 @@ MBS bond populations resolved by symmetry (σ, π, δ, φ)    [with -symmetry]
 | `-symmetry`, `-symmetry-shells` | σ/π/δ/φ matrices condensed to atoms, and additionally to shells (`-sigma-pi` is an accepted alias) |
 | `-label-style {gaussian, physical}` | orbital labels as Gaussian prints them, a running shell counter (Si 3d = 4D, Pt 5d = 9D), or by principal quantum number (3D, 5D). Default: Gaussian's for `sto-3g` and `sto-3g-ano`, physical for `ano-rcc-mb`. Labels only |
 | `-soscf`, `-guess`, `-stable`, `-guessmix`, `-max-cycle` | SCF convergence: Newton solver, initial guess, stability analysis, broken-symmetry mixing |
-| `-json FILE`, `-csv-long FILE` | machine-readable export |
+| `-json FILE`, `-csv-long FILE` | machine-readable export of everything the report prints (JSON schema 1.2, tidy CSV); all five drivers; see §10 |
 | `-npairs N`, `-gvb-trials N`, `-gvb-seed N`, `-gvb-window N`, `-no-keep X` | GVB-PP driver only; see §9 |
 
 `-h` on any driver lists everything.
@@ -271,7 +272,36 @@ A single determinant fills every bonding orbital and empties every antibonding o
 
 ---
 
-## 10. Python API
+## 10. JSON and CSV export
+
+`-json FILE` on any driver (or `minpop-export --out report.out` on a finished report) writes one self-describing record. From schema 1.2 the record holds everything the report prints, so nothing needs to be re-parsed from text:
+
+| Block | Content |
+|---|---|
+| `source` | file, sha256 of the report, code, `command_line` |
+| `system` | charge, multiplicity, natoms, nelectrons |
+| `method` | `name` (`rohf`, `uhf`, `rks`, `uks`, `gvbpp`), `label`, `basis_full`, `basis_heavy` / `basis_light` / `light_max_z` for mixed bases, `spherical`, `ecp`, `hamiltonian` (`text`, `x2c`, `atomic_decoupling`), `xc`, `grid_level`, `minimal_basis`, `scf_solver` |
+| `geometry` | atomic numbers and symbols (whole periodic table), standard and input orientation |
+| `scf` | energy, `s2`, `two_s_plus_one`, S² before and after annihilation, `n_alpha`, `n_beta`, `n_doubly`, `n_singly` |
+| `mbs` | AO labels, gross orbital populations, α and β density matrices, full population matrix, condensed to atoms, atomic spin densities, Mulliken charges and spins and their sums |
+| `projection` | `minimal_basis` and the `completeness` lines: per label (alpha, beta, occupied MOs, natural orbitals) captured and total electrons, leak, leak percent, least-captured MO and its percent, MOs below 99 % |
+| `symmetry` | with `-symmetry`: `condensed_to_atoms` and `atomic_spin_densities` for σ, π, δ, φ, the classes printed as below threshold, and with `-symmetry-shells` the shell labels, their atoms and the shell matrices for all electrons and the spin density |
+| `gvb` | GVB-PP runs: energy, correlation energy, core / pair / open counts, natural orbitals projected, search window, each multi-start trial, and the pair table (occupations, S_ab, kept or merged with its independent fraction, the atoms or lone pair, gross populations, bond population, symmetry) |
+| `warnings` | every WARN / WARNING line |
+
+Matrices are stored whole as `{shape, data, units}`; `minpop_json_csv.load_record(path)` turns every one of them, at any depth, into a numpy array. Blocks that do not apply are `null` (`symmetry` without `-symmetry`, `gvb` for HF/KS). The schema is additive: every 1.1 key keeps its meaning. `-csv-long FILE` writes the same quantities as tidy rows (`quantity`, indices, labels, value), now including `projection_*`, `symmetry_{class}_condensed_to_atoms`, `symmetry_{class}_shells`, their spin counterparts, and `gvb_*`.
+
+```python
+from minpop.minpop_json_csv import load_record
+rec = load_record("pto.json")
+rec["projection"]["completeness"][0]["leak_percent"]
+rec["symmetry"]["condensed_to_atoms"]["pi"]["data"]        # numpy (natoms, natoms)
+rec["symmetry"]["shells"]["labels"], rec["symmetry"]["shells"]["all_electrons"]["sigma"]["data"]
+```
+
+---
+
+## 11. Python API
 
 ```python
 from minpop import run_uks_from_xyz, bond_components
@@ -292,19 +322,20 @@ Return dictionaries hold `dm_alpha`, `dm_beta`, `dm_total`, `dm_spin`, `pop_tota
 
 ---
 
-## 11. Validation
+## 12. Validation
 
 - **STO-3G path versus Gaussian 16.** Mulliken charges, spin populations, gross orbital populations and condensed matrices match to six decimals for CH (quartet), CH₂ (triplet, UHF and ROHF), CHCl₃, TiO₂ (UHF and ROHF) and SnH₄; the Gaussian and PySCF reports are in `validation/`. Version 2 leaves this path byte-identical to 1.x apart from the added completeness line. Use Gaussian's standard-orientation geometry when comparing orbital-resolved matrices.
 - **ANO-RCC truncations.** Sliced coefficients equal Basis Set Exchange's ano-rcc-mb/vdzp/vtzp/vqzp to 10⁻¹² for H, C, Si, Fe, Pt, U (`python minpop/basis_sets/anorcc_basis_pyscf.py` repeats the check with basis-set-exchange installed).
 - **σ/π/δ/φ.** Classes sum to the overlap population to 10⁻¹²; invariant under rotation of the molecule; selection rule asserted on every pair; the generic orbital ordering reproduces the legacy Gaussian order on H₂O, SiH₄, ScH, CuCl, SnH₄.
 - **GVB-PP.** H₂ reproduces CAS(2,2); H₂O keeps the O–H correlating orbitals and merges the lone-pair ones; triplet CH₂; CrH, CrO, Cr₂ in `examples/outputs/`.
-- `pytest -q` runs the fast subset in about ten seconds.
+- JSON schema 1.2: tests compare the record with the printed report field by field (projection completeness, S², symmetry matrices and their sum rule, shell matrices condensing to atom matrices, the GVB-PP pair table); a live `-json` record and one re-parsed from the saved report are identical apart from the source file name.
+- `pytest -q` runs the suite in under a minute.
 
 Worked outputs for Pt₂, PtO, PtH (PBE) and CrH, CrO, Cr₂ (GVB-PP, RHF, PBE) are in `examples/outputs/`, produced by `examples/run_pt_pbe.sh` and `examples/run_cr_gvbpp.sh`.
 
 ---
 
-## 12. References
+## 13. References
 
 1. Montgomery Jr., J. A.; Frisch, M. J.; Ochterski, J. W.; Petersson, G. A. *J. Chem. Phys.* **1999**, *110*, 2822. [10.1063/1.477924](https://doi.org/10.1063/1.477924)
 2. Montgomery Jr., J. A.; Frisch, M. J.; Ochterski, J. W.; Petersson, G. A. *J. Chem. Phys.* **2000**, *112*, 6532. [10.1063/1.481224](https://doi.org/10.1063/1.481224)
@@ -320,4 +351,4 @@ MIT. See [LICENSE](LICENSE).
 
 ## Author
 
-Barbaro Zulueta, [BLZ11](https://github.com/BLZ11)
+Barbaro Zulueta, [BLZ11](https://github.com/BLZ11). Repository: [keithgroup/minpop](https://github.com/keithgroup/minpop)

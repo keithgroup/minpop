@@ -2114,45 +2114,65 @@ def _require_converged(mf, what):
 
 
 def _internal_stability(mf):
-    """(mo, stable) for an unrestricted SCF solution: PySCF's internal UHF/UKS
-    test, plus the RHF->UHF (triplet-type) test when alpha and beta are
-    identical.
+    """(candidates, stable) for an unrestricted SCF solution, from the lowest
+    eigenvalue of the UHF/UKS orbital-rotation Hessian. Unstable: candidates
+    holds two orbital sets, rotated along the lowest mode in each direction.
 
-    PySCF's uhf_internal seeds its eigenvalue search from the orbital
-    gradient, which has identical alpha and beta blocks at a spin-symmetric
-    solution. The search then never leaves the spin-symmetric subspace and
-    cannot see the instability that breaks spin symmetry, which is the one
-    that matters for a closed-shell start. PySCF tests that channel in a
-    separate routine (rhf_external, 'RHF/RKS -> UHF/UKS'), applied here to the
-    restricted wavefunction that the symmetric solution is. Together the two
-    cover what Gaussian's Stable=Opt covers for a UHF wavefunction.
+    An eigenvector has no preferred sign, and at a saddle that is not
+    spin-symmetric the two directions can descend to different minima (seen
+    for a transition state at UHF/STO-3G: one direction ends on the restricted
+    solution, the other 115 mEh lower). The caller reconverges both and keeps
+    the lower, which makes the result independent of that arbitrary sign.
+
+    PySCF's own uhf_internal seeds its eigenvalue search from the orbital
+    gradient alone. At a spin-symmetric solution that vector has identical
+    alpha and beta parts, so the search never leaves the spin-symmetric
+    subspace and cannot see the instability that breaks spin symmetry; at a
+    saddle with several unstable directions it can return a higher one, and
+    following that one can end in a stable solution far above the lowest. The
+    search here spans three seeds: the spin-symmetric one, its
+    spin-antisymmetric partner, and the single most negative diagonal. It
+    asks for the lowest roots and follows the lowest.
     """
     import numpy as _np
-    mo, _, stable, _ = mf.stability(return_status=True)
-    if not stable:
-        return mo, False
-    mol = mf.mol
-    dm = mf.make_rdm1()
-    # 1e-3: a mixed guess that relaxed back to the restricted solution
-    # leaves a small residual asymmetry and must still get this test
-    if mol.nelec[0] != mol.nelec[1] or abs(dm[0] - dm[1]).max() > 1e-3:
-        return mo, True                 # spin symmetry already broken
-    xc = getattr(mf, "xc", None)
-    if xc is None:
-        r = scf.RHF(mol)
-    else:
-        r = dft.RKS(mol)
-        r.xc = xc
-        r.grids = mf.grids
-    r.mo_coeff = _np.asarray(mf.mo_coeff[0])
-    r.mo_energy = _np.asarray(mf.mo_energy[0])
-    r.mo_occ = 2.0 * _np.asarray(mf.mo_occ[0])
-    r.e_tot, r.converged = mf.e_tot, True
-    _, mo_e, _, stable_e = r.stability(internal=False, external=True,
-                                       return_status=True)
-    if stable_e:
-        return mo, True
-    return (_np.asarray(mo_e[0]), _np.asarray(mo_e[1])), False
+    from pyscf import lib as _lib
+    from pyscf.soscf import newton_ah as _nah
+    from pyscf.scf import stability as _stab
+    g, hop, hdiag = _nah.gen_g_hop_uhf(mf, mf.mo_coeff, mf.mo_occ)
+    hdiag = hdiag * 2
+    nocca = int(_np.count_nonzero(mf.mo_occ[0] > 0))
+    nvira = int(_np.count_nonzero(mf.mo_occ[0] == 0))
+    na = nocca * nvira
+
+    def hessian_x(x):
+        return hop(x).real * 2
+
+    def precond(dx, e, x0):
+        d = hdiag - e
+        d[abs(d) < 1e-8] = 1e-8
+        return dx / d
+
+    sym = _np.zeros_like(hdiag)
+    pos = hdiag > 1e-5
+    sym[pos] = 1.0 / hdiag[pos]
+    anti = sym.copy()
+    anti[na:] *= -1.0                      # alpha and beta rotate oppositely
+    unit = _np.zeros_like(hdiag)
+    unit[_np.argmin(hdiag)] = 1.0
+    seeds = [v / _np.linalg.norm(v) for v in (sym, anti, unit)
+             if _np.linalg.norm(v) > 0]
+    nroots = min(3, hdiag.size)
+    e, v = _lib.davidson(hessian_x, seeds, precond, tol=1e-6, nroots=nroots,
+                         max_space=max(30, 6 * nroots), verbose=0)
+    if nroots > 1:
+        k = int(_np.argmin(e))
+        e, v = e[k], v[k]
+    if not (e < -1e-5):
+        return [mf.mo_coeff], True
+    cands = [(_stab._rotate_mo(mf.mo_coeff[0], mf.mo_occ[0], sgn * v[:na]),
+              _stab._rotate_mo(mf.mo_coeff[1], mf.mo_occ[1], sgn * v[na:]))
+             for sgn in (1.0, -1.0)]
+    return cands, False
 
 
 def _stabilize_uhf(mf, max_cycles=10, verbose=False,
@@ -2181,7 +2201,7 @@ def _stabilize_uhf(mf, max_cycles=10, verbose=False,
         UHF object at an internally stable solution (or the last one reached).
     """
     for i in range(1, max_cycles + 1):
-        mo1, stable_i = _internal_stability(mf)
+        cands, stable_i = _internal_stability(mf)
         if stable_i:
             if verbose and i > 1:
                 print(f"Stable=Opt: internally stable after "
@@ -2190,20 +2210,32 @@ def _stabilize_uhf(mf, max_cycles=10, verbose=False,
         if verbose:
             print(f"Stable=Opt: internal instability found; reoptimizing "
                   f"(cycle {i})")
-        dm1 = mf.make_rdm1(mo1, mf.mo_occ)
-        mf.kernel(dm0=dm1)
-        if not mf.converged and newton_fallback:
-            # The surface just past an instability rotation is flat, and DIIS
-            # can crawl along it for hundreds of iterations without meeting the
-            # tolerance. The second-order solver descends it in a handful of
-            # steps, so try that before declaring the run lost.
-            if verbose:
-                print(f"Stable=Opt: DIIS did not converge on cycle {i}; "
-                      f"retrying with the second-order (Newton) solver")
-            conv_tol = mf.conv_tol
-            mf = mf.newton()
-            mf.conv_tol = conv_tol
+        # Reconverge from both directions along the unstable mode and keep the
+        # lower solution: the sign of an eigenvector is arbitrary, and the two
+        # directions can end on different minima.
+        dms = [mf.make_rdm1(mo1, mf.mo_occ) for mo1 in cands]
+        best = None
+        for k, dm1 in enumerate(dms):
             mf.kernel(dm0=dm1)
+            if not mf.converged and newton_fallback:
+                # The surface just past an instability rotation is flat, and
+                # DIIS can crawl along it for hundreds of iterations without
+                # meeting the tolerance. The second-order solver descends it
+                # in a handful of steps, so try that before giving up.
+                if verbose:
+                    print(f"Stable=Opt: DIIS did not converge on cycle {i}; "
+                          f"retrying with the second-order (Newton) solver")
+                conv_tol = mf.conv_tol
+                mf = mf.newton()
+                mf.conv_tol = conv_tol
+                mf.kernel(dm0=dm1)
+            if mf.converged and (best is None or mf.e_tot < best[0] - 1e-9):
+                best = (mf.e_tot, mf.make_rdm1(), k)
+        if best is not None and best[2] != len(dms) - 1:
+            mf.kernel(dm0=best[1])          # return to the lower solution
+        if verbose and best is not None and len(dms) > 1:
+            print(f"Stable=Opt: kept the lower of the two directions "
+                  f"(E = {best[0]:.9f})")
         _require_converged(mf, f"Stable=Opt reoptimization (cycle {i})")
     raise MinPopSCFError(
         f"still internally unstable after {max_cycles} Stable=Opt cycle(s). "

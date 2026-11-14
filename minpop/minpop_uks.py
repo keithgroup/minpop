@@ -2113,6 +2113,48 @@ def _require_converged(mf, what):
             f"the cycle limit.")
 
 
+def _internal_stability(mf):
+    """(mo, stable) for an unrestricted SCF solution: PySCF's internal UHF/UKS
+    test, plus the RHF->UHF (triplet-type) test when alpha and beta are
+    identical.
+
+    PySCF's uhf_internal seeds its eigenvalue search from the orbital
+    gradient, which has identical alpha and beta blocks at a spin-symmetric
+    solution. The search then never leaves the spin-symmetric subspace and
+    cannot see the instability that breaks spin symmetry, which is the one
+    that matters for a closed-shell start. PySCF tests that channel in a
+    separate routine (rhf_external, 'RHF/RKS -> UHF/UKS'), applied here to the
+    restricted wavefunction that the symmetric solution is. Together the two
+    cover what Gaussian's Stable=Opt covers for a UHF wavefunction.
+    """
+    import numpy as _np
+    mo, _, stable, _ = mf.stability(return_status=True)
+    if not stable:
+        return mo, False
+    mol = mf.mol
+    dm = mf.make_rdm1()
+    # 1e-3: a mixed guess that relaxed back to the restricted solution
+    # leaves a small residual asymmetry and must still get this test
+    if mol.nelec[0] != mol.nelec[1] or abs(dm[0] - dm[1]).max() > 1e-3:
+        return mo, True                 # spin symmetry already broken
+    xc = getattr(mf, "xc", None)
+    if xc is None:
+        r = scf.RHF(mol)
+    else:
+        r = dft.RKS(mol)
+        r.xc = xc
+        r.grids = mf.grids
+    r.mo_coeff = _np.asarray(mf.mo_coeff[0])
+    r.mo_energy = _np.asarray(mf.mo_energy[0])
+    r.mo_occ = 2.0 * _np.asarray(mf.mo_occ[0])
+    r.e_tot, r.converged = mf.e_tot, True
+    _, mo_e, _, stable_e = r.stability(internal=False, external=True,
+                                       return_status=True)
+    if stable_e:
+        return mo, True
+    return (_np.asarray(mo_e[0]), _np.asarray(mo_e[1])), False
+
+
 def _stabilize_uhf(mf, max_cycles=10, verbose=False,
                    newton_fallback=True):
     """
@@ -2139,7 +2181,7 @@ def _stabilize_uhf(mf, max_cycles=10, verbose=False,
         UHF object at an internally stable solution (or the last one reached).
     """
     for i in range(1, max_cycles + 1):
-        mo1, _, stable_i, _ = mf.stability(return_status=True)
+        mo1, stable_i = _internal_stability(mf)
         if stable_i:
             if verbose and i > 1:
                 print(f"Stable=Opt: internally stable after "

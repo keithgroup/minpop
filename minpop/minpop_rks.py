@@ -1582,7 +1582,11 @@ def aufbau_violation(mf):
     S = mf.get_ovlp()
     e, C = _sl.eigh(mf.get_fock(dm=dm), S)
     nocc = mf.mol.nelectron // 2
-    w = np.einsum("pi,pq,qr,rs,si->i", C, S, dm, S, C) / 2
+    # occupation of each Fock orbital, diag(C^T S D S C)/2, as matrix
+    # products: O(n^3). The five-operand einsum this replaces looped
+    # over all five indices, O(n^5): hours for a few hundred functions.
+    SC = S @ C
+    w = np.einsum("pi,pi->i", SC, dm @ SC) / 2
     holes = [i + 1 for i in range(nocc) if w[i] < 0.5]
     if not holes:
         return None

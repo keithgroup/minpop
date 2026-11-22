@@ -391,11 +391,12 @@ Return dictionaries hold `dm_alpha`, `dm_beta`, `dm_total`, `dm_spin`, `pop_tota
 
 ## 13. Validation
 
-- **STO-3G path versus Gaussian 16.** Mulliken charges, spin populations, gross orbital populations and condensed matrices match to six decimals for CH (quartet), CH₂ (triplet, UHF and ROHF), CHCl₃, TiO₂ (UHF and ROHF) and SnH₄; the Gaussian and PySCF reports are in `validation/`. Version 2 leaves this path byte-identical to 1.x apart from the added completeness line. Use Gaussian's standard-orientation geometry when comparing orbital-resolved matrices.
+- **STO-3G path versus Gaussian 16.** We validated the code against Gaussian 16 on the GMTKN55 database, comparing Mulliken charges, spin populations, gross orbital populations and condensed matrices. `validation/` holds a few of those systems as examples, with the Gaussian and PySCF reports side by side: CH (quartet), CH₂ (triplet, UHF and ROHF), CHCl₃, TiO₂ (UHF and ROHF) and SnH₄. They match to six decimals. Version 2 leaves this path byte-identical to 1.x apart from the added completeness line. Use Gaussian's standard-orientation geometry when comparing orbital-resolved matrices.
 - **ANO-RCC truncations.** Sliced coefficients equal Basis Set Exchange's ano-rcc-mb/vdzp/vtzp/vqzp to 10⁻¹² for H, C, Si, Fe, Pt, U (`python minpop/basis_sets/anorcc_basis_pyscf.py` repeats the check with basis-set-exchange installed).
 - **σ/π/δ/φ.** Classes sum to the overlap population to 10⁻¹²; invariant under rotation of the molecule; selection rule asserted on every pair; the generic orbital ordering reproduces the legacy Gaussian order on H₂O, SiH₄, ScH, CuCl, SnH₄.
 - **GVB-PP.** H₂ reproduces CAS(2,2); H₂O keeps the O–H correlating orbitals and merges the lone-pair ones; triplet CH₂; CrH, CrO, Cr₂ in `examples/outputs/`.
 - JSON schema 1.2: tests compare the record with the printed report field by field (projection completeness, S², symmetry matrices and their sum rule, shell matrices condensing to atom matrices, the GVB-PP pair table); a live `-json` record and one re-parsed from the saved report are identical apart from the source file name.
+- **Checkpoints.** A reprojection with `-read-chk` reproduces a direct run with the same minimal basis to 10⁻¹³ in every printed number (ROHF, UHF, RKS, UKS; X2C with a mixed basis; ECP). A `-guess-chk` start reaches the same SCF energy as the default guess, and stored orbitals rotated into another frame reproduce the stored energy to 10⁻¹², spherical and Cartesian.
 - `pytest -q` runs the suite in under a minute.
 
 Worked outputs for Pt₂, PtO, PtH (PBE) and CrH, CrO, Cr₂ (GVB-PP, RHF, PBE) are in `examples/outputs/`, produced by `examples/run_pt_pbe.sh` and `examples/run_cr_gvbpp.sh`.

@@ -13,6 +13,7 @@ module:
     guess_density()         a checkpoint as the initial guess of a new SCF
     gvb_start_orbitals()    stored GVB-PP orbitals as the start of a new GVB-PP
     restore_gvbpp()         a stored GVB-PP wavefunction, for reprojection
+    reference_for_gvb()     stored SCF orbitals as the reference of a GVB-PP run
     main()                  `minpop-chk FILE ...`: reproject a checkpoint with
                             whichever driver wrote it, or print what it holds
 
@@ -55,7 +56,7 @@ import sys
 
 import numpy as np
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 FORMAT_VERSION = 1
 GROUP = "minpop"
@@ -559,6 +560,139 @@ def restore_gvbpp(path, verbose=True, explicit=None, atom_str=None,
 
 
 # --------------------------------------------------------------------------- #
+# Stored SCF orbitals as the reference of a GVB-PP run
+# --------------------------------------------------------------------------- #
+_SCF_PHASE = re.compile(r"^(KS-DFT:|Initial guess|SCF:|Stable=Opt|converged SCF|"
+                        r"WARN:|Overwritten|\*\*\*\*|Checkpoint file:)")
+
+
+def _geometry_header(path, mol, meta):
+    """The molecule / basis / orientation / Hamiltonian lines of the stored
+    report, without its SCF lines; rebuilt from the molecule when absent."""
+    m = meta or {}
+    header = m.get("header") or ""
+    if "Molecule:" in header:
+        keep = []
+        for line in header.splitlines():
+            if _SCF_PHASE.match(line):
+                break
+            keep.append(line)
+        while keep and not keep[-1].strip():
+            keep.pop()
+        return "\n".join(keep) + "\n"
+    basis = m.get("basis") or (mol.basis if isinstance(mol.basis, str) else "custom")
+    out = [f"Molecule: {m.get('xyz_file') or path}",
+           f"Charge: {mol.charge}, Multiplicity: {mol.spin + 1}",
+           f"Basis: {basis} "
+           f"({'6D/10F Cartesian' if mol.cart else '5D/7F spherical'})",
+           f"Atoms: {mol.natm}, Electrons: {mol.nelectron}"]
+    return "\n".join(out) + "\n"
+
+
+def reference_for_gvb(path, verbose=True, explicit=None, atom_str=None):
+    """An RHF/ROHF-type reference object for GVB-PP built from the SCF orbitals
+    stored in `path`. No SCF is run: the stored orbitals are the reference.
+
+    restricted orbitals (RHF, ROHF, RKS)  used as stored, with their energies
+    unrestricted orbitals (UHF, UKS)      natural orbitals of the total density
+                                          (occupations near 2, 1, 0), made
+                                          canonical within the doubly occupied,
+                                          singly occupied and virtual blocks
+                                          of the ROHF Fock matrix
+
+    The reference energy is the Hartree-Fock energy of the determinant these
+    orbitals form (for stored RHF/ROHF orbitals, the stored SCF energy), so
+    the GVB-PP correlation energy is measured from a wavefunction energy
+    whatever method produced the orbitals. The Hamiltonian (X2C, ECP) is the
+    stored one. Returns (mf, meta, description).
+    """
+    import scipy.linalg as sl
+    from pyscf import scf
+    mol, rec, meta = load(path)
+    m = meta or {}
+    ex = explicit or {}
+    if mol.cart:
+        raise CheckpointError(
+            f"{path} uses Cartesian d/f functions; the GVB-PP driver works "
+            f"with spherical functions. Rerun the SCF with -spherical.")
+    _check_explicit(path, mol, meta, explicit)
+    if atom_str is not None:
+        check_geometry(path, mol, atom_str)
+    x2c = bool(m.get("x2c")) if meta else bool(ex.get("x2c") or ex.get("x2c_atomic"))
+    atomic = bool(m.get("x2c_atomic")) if meta else bool(ex.get("x2c_atomic"))
+    mf = scf.ROHF(mol) if mol.spin else scf.RHF(mol)
+    if x2c:
+        mf = mf.x2c()
+        if atomic:
+            mf.with_x2c.approx = "atom1e"
+    c = np.asarray(rec["mo_coeff"])
+    occ = np.asarray(rec["mo_occ"])
+    S = mol.intor("int1e_ovlp")
+    na, nb = mol.nelec
+    src = m.get("method") or ("unrestricted" if c.ndim == 3 else "restricted")
+    if m.get("xc"):
+        src += f"/{m['xc']}"
+    note = None
+    if c.ndim == 3:
+        dma = c[0][:, occ[0] > 0.5] @ c[0][:, occ[0] > 0.5].T
+        dmb = c[1][:, occ[1] > 0.5] @ c[1][:, occ[1] > 0.5].T
+        n, v = sl.eigh(S @ (dma + dmb) @ S, S)
+        order = np.argsort(-n)
+        n, v = n[order], v[:, order]
+        blocks = [slice(0, nb), slice(nb, na), slice(na, v.shape[1])]
+        mo_occ = np.zeros(v.shape[1])
+        mo_occ[:nb], mo_occ[nb:na] = 2.0, 1.0
+        dd = v[:, :nb] @ v[:, :nb].T
+        ds = v[:, nb:na] @ v[:, nb:na].T
+        fock = mf.get_fock(dm=np.array([dd + ds, dd])) if mol.spin else \
+            mf.get_fock(dm=2 * dd)
+        fock = np.asarray(fock)
+        mo_e = np.zeros(v.shape[1])
+        for b in blocks:
+            if b.stop > b.start:
+                e, u = np.linalg.eigh(v[:, b].T @ fock @ v[:, b])
+                v[:, b] = v[:, b] @ u
+                mo_e[b] = e
+        mo = v
+        what = (f"{src} natural orbitals, canonical within the doubly occupied, "
+                f"singly occupied and virtual blocks")
+        lo = n[nb - 1] if nb else 2.0
+        hi = n[na] if na < len(n) else 0.0
+        note = (f"natural occupations: lowest doubly occupied {lo:.4f}, "
+                f"highest virtual {hi:.4f}")
+    else:
+        mo, mo_occ = c, occ
+        mo_e = np.asarray(rec["mo_energy"])
+        what = f"{src} " + ("Kohn-Sham orbitals" if m.get("xc")
+                            else "canonical orbitals" if meta else "orbitals")
+    mf.mo_coeff, mf.mo_occ, mf.mo_energy = mo, mo_occ, mo_e
+    e_ref = float(mf.energy_tot(dm=mf.make_rdm1(mo, mo_occ)))
+    mf.e_tot = e_ref
+    mf.converged = True
+    stored = float(rec["e_tot"])
+    scf_solution = c.ndim == 2 and abs(e_ref - stored) < 1e-6
+    if src in ("ROHF", "RHF") and not scf_solution:
+        note = (f"WARNING: the stored SCF energy ({stored:.9f}) is not the "
+                f"Hartree-Fock energy of the stored orbitals with this "
+                f"Hamiltonian; check -x2c / the checkpoint")
+    if verbose:
+        print(f"Checkpoint file: {path} (read; SCF not rerun, its orbitals are "
+              f"the reference for GVB-PP)")
+        sys.stdout.write(_geometry_header(path, mol, meta))
+        print()
+        print(f"GVB-PP reference: {what}, from checkpoint {path}")
+        if scf_solution:
+            print(_energy_line(e_ref))
+        else:
+            print(f"GVB-PP reference energy = {e_ref:.10f}  (Hartree-Fock "
+                  f"energy of the reference determinant; stored {src} energy "
+                  f"{stored:.10f})")
+        if note:
+            print(f"GVB-PP reference: {note}")
+    return mf, meta, what
+
+
+# --------------------------------------------------------------------------- #
 # A checkpoint as the initial guess of a new SCF (-guess-chk)
 # --------------------------------------------------------------------------- #
 def _align(old, new):
@@ -878,30 +1012,43 @@ def add_arguments(parser):
     return g
 
 
-def resolve_cli(parser, args, method, argv=None):
+def resolve_cli(parser, args, method, argv=None, optimizes=False, keep=()):
     """Validate the checkpoint flags of a driver. Returns (chk, read_chk,
     explicit, xyz): xyz is the geometry file to hand to the run (None when a
     reprojection was given no -xyz). Fills args.xyz_file from the checkpoint
-    when -xyz is absent, for the exports."""
+    when -xyz is absent, for the exports.
+
+    optimizes : the -read-chk run still optimizes a wavefunction (GVB-PP on
+                stored SCF orbitals), so it writes a checkpoint of its own
+    keep      : SCF_PROCEDURE keys that still apply in that case
+    """
     explicit = explicit_args(parser, argv)
     if args.read_chk:
-        if args.chk:
+        if args.chk and not optimizes:
             parser.error("-chk and -read-chk together: a reprojection does "
                          "not rerun the SCF, so there is nothing new to write")
-        ignored = sorted(SCF_PROCEDURE[k] for k in explicit if k in SCF_PROCEDURE)
+        ignored = sorted(SCF_PROCEDURE[k] for k in explicit
+                         if k in SCF_PROCEDURE and k not in keep)
         if ignored:
             print(f"[chk] no SCF is run with -read-chk; ignored: "
                   f"{', '.join(ignored)}", file=sys.stderr)
+        try:
+            _, _, meta = load(args.read_chk)
+        except CheckpointError as exc:
+            sys.exit(f"MinPop ERROR: {exc}")
+        named = (meta or {}).get("xyz_file") or args.read_chk
         if not args.xyz_file:
-            try:
-                _, _, meta = load(args.read_chk)
-            except CheckpointError as exc:
-                sys.exit(f"MinPop ERROR: {exc}")
-            args.xyz_file = (meta or {}).get("xyz_file") or args.read_chk
+            args.xyz_file = named
             scf_xyz = None
         else:
             scf_xyz = args.xyz_file
-        return None, args.read_chk, explicit, scf_xyz
+        chk = None
+        if optimizes and not args.no_chk:
+            chk = args.chk or default_path(named, method)
+            if os.path.abspath(chk) == os.path.abspath(args.read_chk):
+                parser.error(f"-chk {chk} is the file being read; give the "
+                             f"new checkpoint another name")
+        return chk, args.read_chk, explicit, scf_xyz
     if not args.xyz_file:
         parser.error("give -xyz FILE (run the SCF) or -read-chk FILE "
                      "(reuse a stored one)")

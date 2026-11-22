@@ -26,3 +26,9 @@ minpop-chk   cro_gvbpp.chk -info
 minpop-gvbpp -xyz xyz/crh.xyz -mult 6 -npairs 1 -basis ano-rcc-vtzp -minimal-basis ano-rcc-mb \
              -x2c -symmetry-shells -soscf -guess-chk crh_gvbpp.chk -chk crh_vtzp.chk > crh_gvb_vtzp.out 2>&1
 grep -H "GVB-PP start\|converged GVB-PP energy" crh_gvb_vtzp.out
+# GVB-PP on stored SCF orbitals: no SCF, the checkpoint's orbitals are the
+# reference (ROHF here; RKS, UHF and UKS checkpoints work the same way):
+minpop-rohf  -xyz xyz/crh.xyz -mult 6 -basis ano-rcc-vdzp -x2c -soscf -chk crh_rohf.chk > crh_rohf.out 2>&1
+minpop-gvbpp -read-chk crh_rohf.chk -npairs 1 -minimal-basis ano-rcc-mb -symmetry-shells \
+             -chk crh_from_rohf.chk > crh_gvb_from_rohf.out 2>&1
+grep -H "GVB-PP reference\|converged GVB-PP energy" crh_gvb_from_rohf.out

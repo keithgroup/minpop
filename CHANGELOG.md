@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.5.0 (2026-11-22)
+
+Added
+- `minpop-gvbpp -read-chk FILE` on an SCF checkpoint (RHF, ROHF, UHF, RKS, UKS, plain PySCF): the stored orbitals are the reference orbitals and GVB-PP runs on them, with no SCF (`minpop_chk.reference_for_gvb`). Restricted orbitals enter as stored. Unrestricted orbitals enter as natural orbitals of the total density, made canonical within the doubly occupied, singly occupied and virtual blocks. The reference energy is the Hartree-Fock energy of the reference determinant. `-npairs` and the `-gvb-*` flags apply, and the run writes a GVB-PP checkpoint.
+- The report prints `GVB-PP reference: ...`; JSON schema 1.5 adds `gvb.reference = {orbitals, checkpoint, energy_hartree}`. Additive over 1.4.
+
+Changed
+- `minpop-gvbpp -read-chk` no longer refuses an SCF checkpoint (2.4.0 did). `-guess-chk` is unchanged: it starts a new reference SCF from the file.
+
 ## 2.4.0 (2026-11-22)
 
 Added

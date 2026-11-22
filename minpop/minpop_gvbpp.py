@@ -171,7 +171,7 @@ def run_gvbpp_multistart(mol, mf, n_pairs, window, guess='auto', n_trials=2,
             best = g
     return best, log
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +501,16 @@ def _gvb_from_xyz(xyz_file, n_pairs, charge=0, multiplicity=1, basis='6-31+G',
         dm0 = mf.get_init_guess(key=guess) if guess != 'minao' else None
     mf.kernel(dm0=dm0)
     R._require_converged(mf, "SCF")
+    return _gvb_optimize(mol, mf, n_pairs, gvb_guess=gvb_guess, gvb_trials=gvb_trials,
+                         gvb_verbose=gvb_verbose, gvb_window=gvb_window,
+                         gvb_seed=gvb_seed, guess_chk=guess_chk, verbose=verbose)
+
+
+def _gvb_optimize(mol, mf, n_pairs, gvb_guess='auto', gvb_trials=2, gvb_verbose=0,
+                  gvb_window=None, gvb_seed=0, guess_chk=None, verbose=True):
+    """GVB-PP orbital optimization on the reference `mf` (converged RHF/ROHF, or
+    stored orbitals read from a checkpoint). Returns the GVBPP object."""
+    _need_gvbpp()
     # stored GVB-PP natural orbitals as the first (or only) GVB-PP start
     mo_start = (_chk.gvb_start_orbitals(guess_chk, mol, mf, n_pairs, verbose=verbose)
                 if guess_chk else None)
@@ -540,10 +550,14 @@ def run_gvbpp_from_xyz(xyz_file=None, n_pairs=None, *args, chk=None,
         occupations, energies, and the RHF/ROHF reference) to this PySCF
         checkpoint file.
     read_chk : str, optional
-        Skip the SCF and the GVB-PP optimization and project the wavefunction
-        stored in this checkpoint. xyz_file and n_pairs are then optional;
-        only minimal_basis, keep_tol, azimuthal_gauge and verbose still
-        matter. The gvbpp package is not needed for this.
+        A GVB-PP checkpoint: skip the SCF and the GVB-PP optimization and
+        project the stored wavefunction. xyz_file and n_pairs are then
+        optional; only minimal_basis, keep_tol, azimuthal_gauge and verbose
+        still matter. The gvbpp package is not needed for this.
+        An SCF checkpoint (RHF, ROHF, UHF, RKS, UKS, plain PySCF): skip the
+        SCF, take the stored orbitals as the reference orbitals, and run
+        GVB-PP on them (n_pairs and the gvb_* arguments apply; chk writes the
+        resulting GVB-PP checkpoint).
     explicit : dict, optional
         Settings the caller insists on (command line only); a checkpoint that
         disagrees with them is refused.
@@ -559,6 +573,53 @@ def run_gvbpp_from_xyz(xyz_file=None, n_pairs=None, *args, chk=None,
     bound = inspect.signature(_gvb_from_xyz).bind(xyz_file, n_pairs, *args, **kwargs)
     bound.apply_defaults()
     kw = dict(bound.arguments)
+    if read_chk and _chk.load_gvbpp(read_chk) is None:
+        # An SCF checkpoint (RHF, ROHF, UHF, RKS, UKS or plain PySCF): its
+        # orbitals are the reference. No SCF; GVB-PP runs on them.
+        if n_pairs is None:
+            raise _chk.CheckpointError(
+                f"{read_chk} holds SCF orbitals and no GVB-PP wavefunction, so "
+                f"GVB-PP has to run on them: give -npairs N")
+        verbose = kw["verbose"]
+        atom_str = R._read_xyz(xyz_file) if xyz_file else None
+
+        def from_reference():
+            mf, _, _ = _chk.reference_for_gvb(read_chk, verbose=verbose,
+                                              explicit=explicit, atom_str=atom_str)
+            return _gvb_optimize(mf.mol, mf, n_pairs, gvb_guess=kw["gvb_guess"],
+                                 gvb_trials=kw["gvb_trials"],
+                                 gvb_verbose=kw["gvb_verbose"],
+                                 gvb_window=kw["gvb_window"], gvb_seed=kw["gvb_seed"],
+                                 guess_chk=kw["guess_chk"], verbose=verbose)
+        settings = dict(kw, reference_chk=read_chk)
+        if chk:
+            with _chk.recording() as buf:
+                g = from_reference()
+            try:
+                _, _, meta = _chk.load(read_chk)
+                for key in ("basis", "basis_light", "light_max_z", "xyz_file"):
+                    if meta and meta.get(key) not in (None, ""):
+                        settings[key] = meta[key]
+                settings["x2c"] = bool(getattr(g.mf, "with_x2c", None))
+                settings["x2c_atomic"] = (getattr(getattr(g.mf, "with_x2c", None),
+                                                  "approx", "") == "atom1e")
+                # the stored section names its reference in the "GVB-PP
+                # reference:" line; the line about reading that file is not
+                # part of the wavefunction's own record
+                header = "".join(l for l in buf.getvalue().splitlines(True)
+                                 if not l.startswith("Checkpoint file:"))
+                _chk.save(g.mf, chk, "GVBPP", header=header,
+                          settings=settings, gvb=g)
+                if verbose:
+                    print(f"Checkpoint file: {chk} (written; reuse with -read-chk)")
+                    print()
+            except Exception as exc:
+                print(f"[chk] could not write {chk}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+        else:
+            g = from_reference()
+        return minpop_gvbpp(g, minimal_basis=kw["minimal_basis"], keep_tol=kw["keep_tol"],
+                            azimuthal_gauge=kw["azimuthal_gauge"], verbose=verbose)
     return _chk.run_with_checkpoint(
         "GVBPP", _gvb_from_xyz, minpop_gvbpp, kw,
         dict(minimal_basis=kw["minimal_basis"], keep_tol=kw["keep_tol"],
@@ -578,7 +639,9 @@ def main():
                "  python minpop_gvbpp.py -read-chk cr2.chk -minimal-basis ano-rcc-mb-occ "
                "-symmetry   # reproject, no SCF, no GVB-PP\n"
                "  python minpop_gvbpp.py -xyz cr2.xyz -npairs 6 -basis ano-rcc-vtzp -x2c "
-               "-guess-chk cr2.chk   # GVB-PP from the stored orbitals")
+               "-guess-chk cr2.chk   # GVB-PP from the stored orbitals\n"
+               "  python minpop_gvbpp.py -read-chk cr2_rohf.chk -npairs 6 -gvb-trials 20 "
+               "        # GVB-PP on stored SCF orbitals, no SCF")
     p.add_argument("-xyz", dest="xyz_file", default=None,
                    help="Path to XYZ geometry file (required unless -read-chk is given)")
     p.add_argument("-npairs", type=int, dest="n_pairs", default=None,
@@ -642,14 +705,20 @@ def main():
     g.add_argument("-no-chk", dest="no_chk", action="store_true", default=False,
                    help="Do not write a checkpoint file")
     g.add_argument("-read-chk", dest="read_chk", metavar="PATH", default=None,
-                   help="Skip the SCF and the GVB-PP optimization: read the GVB-PP "
-                        "wavefunction from this checkpoint and project it. -xyz and "
-                        "-npairs are then optional; basis, charge, multiplicity, "
-                        "Hamiltonian and pair count come from the file, and a flag "
-                        "that disagrees with it stops the run. -minimal-basis, "
-                        "-no-keep, -light-max-z, -label-style, -symmetry, "
-                        "-symmetry-shells, -no-azimuthal-gauge, -json and -csv-long "
-                        "apply as usual. Does not need the gvbpp package")
+                   help="Read the wavefunction from this checkpoint; no SCF is run. "
+                        "(1) A GVB-PP checkpoint: the GVB-PP optimization is skipped "
+                        "too and the stored wavefunction is projected. -xyz and "
+                        "-npairs are optional and the gvbpp package is not needed. "
+                        "(2) An SCF checkpoint (RHF, ROHF, UHF, RKS, UKS, or a plain "
+                        "PySCF chkfile): its orbitals are the reference orbitals and "
+                        "GVB-PP runs on them. -npairs is required, the -gvb-* flags "
+                        "apply, and a GVB-PP checkpoint is written. Restricted "
+                        "orbitals are used as stored; unrestricted ones enter as "
+                        "natural orbitals. In both cases basis, charge, multiplicity "
+                        "and Hamiltonian come from the file, a flag that disagrees "
+                        "stops the run, and -minimal-basis, -no-keep, -light-max-z, "
+                        "-label-style, -symmetry, -symmetry-shells, "
+                        "-no-azimuthal-gauge, -json and -csv-long apply as usual")
     g.add_argument("-guess-chk", dest="guess_chk", metavar="PATH", default=None,
                    help="Run the SCF and GVB-PP, started from this checkpoint. The "
                         "reference SCF starts from its SCF orbitals (any MinPop or "
@@ -659,7 +728,7 @@ def main():
                         "-gvb-guess). Basis and frame may differ; atoms, charge and "
                         "multiplicity must match. Replaces -guess")
     p.add_argument("-json", dest="json_path", metavar="PATH", default=None,
-                   help="Also serialize this run to a JSON record (schema 1.4) via "
+                   help="Also serialize this run to a JSON record (schema 1.5) via "
                         "minpop_json_csv.py; a failed export never fails the run")
     p.add_argument("-json-xyz-dir", dest="json_xyz_dir", action="append", metavar="DIR",
                    default=None, help="Directory with the input .xyz (repeatable)")
@@ -667,13 +736,19 @@ def main():
                    help="Also write the tidy sparse CSV of every printed quantity")
     p.add_argument("-csv-sparse-tol", dest="csv_sparse_tol", type=float, default=0.0)
     args = p.parse_args()
-    chk_path, read_chk, chk_explicit, scf_xyz = _chk.resolve_cli(p, args, "GVBPP")
-    if not read_chk and args.n_pairs is None:
-        p.error("-npairs N is required to run GVB-PP (only -read-chk takes it "
-                "from the checkpoint)")
+    # -read-chk on an SCF checkpoint still runs GVB-PP (on the stored orbitals)
+    scf_reference = bool(args.read_chk and os.path.isfile(args.read_chk)
+                         and _chk.load_gvbpp(args.read_chk) is None)
+    chk_path, read_chk, chk_explicit, scf_xyz = _chk.resolve_cli(
+        p, args, "GVBPP", optimizes=scf_reference,
+        keep=("gvb_guess", "gvb_trials", "gvb_seed", "gvb_window", "gvb_verbose",
+              "guess_chk") if scf_reference else ())
+    if (not read_chk or scf_reference) and args.n_pairs is None:
+        p.error("-npairs N is required to run GVB-PP (only -read-chk on a GVB-PP "
+                "checkpoint takes it from the file)")
     # a GVB-PP checkpoint as the start replaces the multi-start unless the
     # user asks for those starts too
-    if (args.guess_chk and not read_chk and "gvb_guess" not in chk_explicit
+    if (args.guess_chk and (not read_chk or scf_reference) and "gvb_guess" not in chk_explicit
             and "gvb_trials" not in chk_explicit):
         args.gvb_guess = "checkpoint"
 

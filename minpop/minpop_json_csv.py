@@ -33,7 +33,7 @@ Every quantity carries its own shape and units, and matrices are stored whole
 record round-trips to the exact float values Gaussian printed.
 
     {
-      "schema": "minpop-record", "schema_version": "1.4",
+      "schema": "minpop-record", "schema_version": "1.5",
       "source":   {file, sha256, code, parsed_utc},
       "system":   {id, reaction, point, charge, multiplicity, natoms, nelectrons},
       "method":   {name, basis, guess_mix, stable_opt},
@@ -61,6 +61,9 @@ record round-trips to the exact float values Gaussian printed.
 
 Schema history
 --------------
+1.5  gvb.reference = {orbitals, checkpoint, energy_hartree} | null: the stored SCF
+     orbitals a GVB-PP run used as its reference (minpop-gvbpp -read-chk on an
+     SCF checkpoint) and the Hartree-Fock energy of that determinant. Additive.
 1.4  source.guess_checkpoint = path | null: the checkpoint the SCF was started
      from (-guess-chk). Additive.
 1.3  source.checkpoint = {path, mode} | null. mode is "written" (the run did the
@@ -105,7 +108,7 @@ from pathlib import Path
 import numpy as np
 
 SCHEMA = "minpop-record"
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 
 _SYMBOLS = ("H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn "
             "Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce "
@@ -718,7 +721,14 @@ def parse_gvb(text):
     g = {"energy_hartree": None, "e_corr_hartree": None, "n_core": None, "n_pairs": None,
          "n_open": None, "n_natural_orbitals": None, "n_projected": None,
          "search_window": None, "guess": None, "n_trials": None, "trials": [], "pairs": [],
-         "core_like_warning": "pair(s)" in text and "are core-like" in text}
+         "core_like_warning": "pair(s)" in text and "are core-like" in text,
+         "reference": None}                                        # schema 1.5
+    m = re.search(r"^GVB-PP reference: (.+?), from checkpoint (.+?)\s*$", text, re.M)
+    if m:
+        e = re.search(r"^GVB-PP reference energy = (-?\d+\.\d+)", text, re.M) or \
+            re.search(r"^converged SCF energy\s*=\s*(-?\d+\.\d+)", text, re.M)
+        g["reference"] = {"orbitals": m.group(1), "checkpoint": m.group(2),
+                          "energy_hartree": float(e.group(1)) if e else None}
     m = re.findall(r"GVB-PP energy\s*=\s*(-?\d+\.\d+)\s+E_corr\s*=\s*(-?\d+\.\d+)", text)
     if m:
         g["energy_hartree"], g["e_corr_hartree"] = float(m[-1][0]), float(m[-1][1])

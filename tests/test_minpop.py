@@ -135,7 +135,7 @@ def _run_json(script, tmp_path, *args):
 def test_json_uhf_matches_report(tmp_path):
     text, rec = _run_json("minpop_uhf.py", tmp_path, "-xyz", f"{XYZ}/ch2.xyz", "-mult", "3",
                           "-basis", "6-31G", "-symmetry-shells")
-    assert rec["schema_version"] == "1.4"
+    assert rec["schema_version"] == "1.5"
     assert rec["method"]["name"] == "uhf" and rec["method"]["label"] == "UHF"
     assert rec["method"]["basis_full"] == "6-31G" and rec["method"]["spherical"] is True
     assert rec["method"]["minimal_basis"].startswith("STO-3G")
@@ -413,3 +413,32 @@ def test_gvbpp_guess_chk_other_basis(tmp_path):
     assert "GVB-PP start: natural orbitals of" in seeded
     assert len(re.findall(r"^  guess=", seeded, re.M)) == 1 and "guess=checkpoint" in seeded
     assert _gvb_energy(seeded) < _gvb_energy(multi) + 1e-6
+
+
+@_no_gvbpp
+def test_gvbpp_on_stored_scf_orbitals(tmp_path):
+    """-read-chk on an SCF checkpoint: its orbitals are the reference, no SCF,
+    and the GVB-PP energy equals that of a direct run."""
+    base = ("-xyz", f"{XYZ}/ch2.xyz", "-mult", "3", "-basis", "6-31G")
+    direct = _gvb_energy(run("minpop_gvbpp.py", *base, "-npairs", "2", "-no-chk"))
+    cases = (("minpop_rohf.py", (), "ROHF canonical orbitals", True),
+             ("minpop_uhf.py", (), "UHF natural orbitals", False),
+             ("minpop_uks.py", ("-xc", "pbe"), "UKS/pbe natural orbitals", False))
+    for script, extra, label, scf_line in cases:
+        chk = str(tmp_path / (script[:-3] + ".chk"))
+        run(script, *base, *extra, "-chk", chk)
+        out_chk = str(tmp_path / (script[:-3] + "_gvb.chk"))
+        js = tmp_path / (script[:-3] + ".json")
+        text = run("minpop_gvbpp.py", "-read-chk", chk, "-npairs", "2", "-chk", out_chk,
+                   "-json", str(js))
+        assert "SCF not rerun, its orbitals are the reference" in text
+        assert f"GVB-PP reference: {label}" in text
+        assert ("converged SCF energy" in text) == scf_line
+        assert abs(_gvb_energy(text) - direct) < 2e-6
+        ref = json.loads(js.read_text())["gvb"]["reference"]
+        assert ref["checkpoint"] == chk and ref["energy_hartree"] is not None
+        # the result is an ordinary GVB-PP checkpoint
+        again = run("minpop_chk.py", out_chk, "-minimal-basis", "minao")
+        assert "SCF and GVB-PP not rerun" in again and _gvb_energy(again) == _gvb_energy(text)
+    err = run("minpop_gvbpp.py", "-read-chk", chk, ok=False)
+    assert "-npairs N is required" in err

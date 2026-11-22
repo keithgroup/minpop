@@ -22,7 +22,7 @@ def run(script, *args, ok=True):
                          cwd=WORK, env=env)
     if not ok:
         assert out.returncode != 0
-        return out.stderr
+        return out.stdout + out.stderr
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
     return out.stdout
 
@@ -343,3 +343,73 @@ def test_guess_chk_rotated_frame():
         mol2 = mk(xyz @ R.T + 0.4)
         dm = minpop_chk.guess_density(chk, mol2, "UHF", verbose=False)
         assert abs(scf.UHF(mol2).energy_tot(dm=dm) - mf.e_tot) < 1e-8
+
+
+# ---------------------------------------------------------------------------
+# GVB-PP checkpoints
+# ---------------------------------------------------------------------------
+_no_gvbpp = pytest.mark.skipif(__import__("importlib").util.find_spec("gvbpp") is None,
+                               reason="gvbpp not installed")
+
+
+def _gvb_energy(text):
+    return float(re.findall(r"converged GVB-PP energy = (-?\d+\.\d+)", text)[-1])
+
+
+@_no_gvbpp
+def test_gvbpp_chk_round_trip_is_exact(tmp_path):
+    """The analysis of a GVB-PP wavefunction read back from its checkpoint is
+    the same text as the analysis before writing, for several projections."""
+    import io, contextlib
+    sys.path.insert(0, PKG)
+    import minpop_gvbpp as G, minpop_chk as C
+    chk = str(tmp_path / "ch2.chk")
+    with contextlib.redirect_stdout(io.StringIO()):
+        g = G._gvb_from_xyz(f"{XYZ}/ch2.xyz", 2, multiplicity=3, basis="6-31G*", verbose=False)
+        C.save(g.mf, chk, "GVBPP", settings={"basis": "6-31G*"}, gvb=g)
+        g2, _ = C.restore_gvbpp(chk, verbose=False)
+    assert g2.n_pairs == 2 and g2.n_open == 2 and abs(g2.e_tot - g.e_tot) < 1e-12
+    for mb, kw in (("sto-3g", {}), ("minao", {}), ("ano-rcc-mb", {}), ("sto-3g", {"keep_tol": 0.9})):
+        outs = []
+        for obj in (g, g2):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                G.minpop_gvbpp(obj, minimal_basis=mb, **kw)
+            outs.append(buf.getvalue())
+        assert outs[0] == outs[1] and "MBS Mulliken charges" in outs[0]
+
+
+@_no_gvbpp
+def test_gvbpp_chk_command_line(tmp_path):
+    chk = str(tmp_path / "w.chk")
+    first = run("minpop_gvbpp.py", "-xyz", f"{XYZ}/h2o.xyz", "-npairs", "2", "-basis", "6-31G",
+                "-chk", chk)
+    assert "(written" in first
+    js = tmp_path / "w.json"
+    again = run("minpop_chk.py", chk, "-minimal-basis", "minao", "-json", str(js))
+    assert "SCF and GVB-PP not rerun" in again and "MINAO" in again
+    assert _gvb_energy(again) == _gvb_energy(first)
+    rec = json.loads(js.read_text())
+    assert rec["method"]["name"] == "gvbpp" and rec["gvb"]["n_pairs"] == 2
+    assert rec["source"]["checkpoint"]["mode"] == "read"
+    info = run("minpop_chk.py", chk, "-info")
+    assert "GVB-PP energy" in info and "2 pairs" in info
+    # wrong tool, wrong pair count
+    assert "holds a GVB-PP wavefunction" in run("minpop_rohf.py", "-read-chk", chk, ok=False)
+    assert "pair count comes from" in run("minpop_gvbpp.py", "-read-chk", chk, "-npairs", "3",
+                                          ok=False)
+
+
+@_no_gvbpp
+def test_gvbpp_guess_chk_other_basis(tmp_path):
+    xyz = tmp_path / "n2.xyz"
+    xyz.write_text("2\n\nN 0 0 0\nN 0 0 1.0977\n")
+    chk = str(tmp_path / "n2.chk")
+    run("minpop_gvbpp.py", "-xyz", str(xyz), "-npairs", "3", "-basis", "6-31G", "-chk", chk)
+    multi = run("minpop_gvbpp.py", "-xyz", str(xyz), "-npairs", "3", "-basis", "6-31G*",
+                "-no-chk")
+    seeded = run("minpop_gvbpp.py", "-xyz", str(xyz), "-npairs", "3", "-basis", "6-31G*",
+                 "-no-chk", "-guess-chk", chk)
+    assert "GVB-PP start: natural orbitals of" in seeded
+    assert len(re.findall(r"^  guess=", seeded, re.M)) == 1 and "guess=checkpoint" in seeded
+    assert _gvb_energy(seeded) < _gvb_energy(multi) + 1e-6

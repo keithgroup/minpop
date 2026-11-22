@@ -13,3 +13,16 @@ minpop-gvbpp -xyz xyz/cro.xyz -mult 5 -npairs 4 $OPTS                         > 
 minpop-gvbpp -xyz xyz/cr2.xyz -mult 1 -npairs 6 $OPTS -gvb-trials 8 -gvb-seed 0 > cr2_gvb_s0.out 2>&1
 minpop-gvbpp -xyz xyz/cr2.xyz -mult 1 -npairs 6 $OPTS -gvb-trials 8 -gvb-seed 1 > cr2_gvb_s1.out 2>&1
 grep -H "converged GVB-PP energy\|WARNING" crh_gvb.out cro_gvb.out cr2_gvb_s?.out
+
+# Checkpoints (README section 11). Each run above wrote <name>_gvbpp.chk; the two
+# Cr2 seeds share cr2_gvbpp.chk, so name the checkpoint when you keep both:
+#   ... -gvb-seed 0 -chk cr2_s0.chk      ... -gvb-seed 1 -chk cr2_s1.chk
+# Reproject a stored GVB-PP wavefunction, no SCF and no GVB-PP optimization:
+minpop-gvbpp -read-chk crh_gvbpp.chk -minimal-basis ano-rcc-mb-occ -symmetry-shells > crh_gvb_occ.out 2>&1
+minpop-chk   cro_gvbpp.chk -minimal-basis sto-3g-ano -symmetry-shells              > cro_gvb_sto3g_ano.out 2>&1
+minpop-chk   cro_gvbpp.chk -info
+# Start a larger-basis GVB-PP from the stored natural orbitals (one optimization
+# instead of the multi-start):
+minpop-gvbpp -xyz xyz/crh.xyz -mult 6 -npairs 1 -basis ano-rcc-vtzp -minimal-basis ano-rcc-mb \
+             -x2c -symmetry-shells -soscf -guess-chk crh_gvbpp.chk -chk crh_vtzp.chk > crh_gvb_vtzp.out 2>&1
+grep -H "GVB-PP start\|converged GVB-PP energy" crh_gvb_vtzp.out

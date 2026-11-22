@@ -3,13 +3,16 @@
 MinPop checkpoint files: keep the converged SCF, reproject it later.
 
 The SCF is the expensive part of a MinPop run and the projection is cheap. The
-four drivers (minpop_rohf / minpop_uhf / minpop_rks / minpop_uks) therefore
-obtain their wavefunction through this module:
+drivers (minpop_rohf / minpop_uhf / minpop_rks / minpop_uks, and minpop_gvbpp
+for GVB-PP wavefunctions) therefore obtain their wavefunction through this
+module:
 
     run_with_checkpoint()   run the SCF and write a checkpoint, or read a
                             checkpoint and skip the SCF; then run the analysis
     save() / restore()      write / read one checkpoint
     guess_density()         a checkpoint as the initial guess of a new SCF
+    gvb_start_orbitals()    stored GVB-PP orbitals as the start of a new GVB-PP
+    restore_gvbpp()         a stored GVB-PP wavefunction, for reprojection
     main()                  `minpop-chk FILE ...`: reproject a checkpoint with
                             whichever driver wrote it, or print what it holds
 
@@ -52,10 +55,11 @@ import sys
 
 import numpy as np
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 FORMAT_VERSION = 1
 GROUP = "minpop"
+GVB_GROUP = "gvbpp"
 
 # method tag -> (unrestricted orbitals?, Kohn-Sham?, driver module, console script)
 METHODS = {
@@ -63,6 +67,9 @@ METHODS = {
     "UHF":  (True,  False, "minpop_uhf",  "minpop-uhf"),
     "RKS":  (False, True,  "minpop_rks",  "minpop-rks"),
     "UKS":  (True,  True,  "minpop_uks",  "minpop-uks"),
+    # GVB-PP: the scf record is the RHF/ROHF reference; the GVB-PP natural
+    # orbitals and occupations sit in their own group (GVB_GROUP)
+    "GVBPP": (False, False, "minpop_gvbpp", "minpop-gvbpp"),
 }
 
 # Flags that define the SCF. With -read-chk they come from the checkpoint; one
@@ -79,6 +86,9 @@ SCF_PROCEDURE = {
     "newton_conv_tol": "-newton-conv-tol", "max_cycle": "-max-cycle",
     "basis_dir": "-basis-dir", "standard_orientation": "-no-std-orient",
     "guess_chk": "-guess-chk",
+    "gvb_guess": "-gvb-guess", "gvb_trials": "-gvb-trials",
+    "gvb_seed": "-gvb-seed", "gvb_window": "-gvb-window",
+    "gvb_verbose": "-gvb-verbose",
 }
 
 
@@ -189,12 +199,14 @@ def _energy_line(e_tot, s2=None):
 # --------------------------------------------------------------------------- #
 # Write
 # --------------------------------------------------------------------------- #
-def save(mf, path, method, header="", settings=None):
+def save(mf, path, method, header="", settings=None, gvb=None):
     """Write the converged SCF in `mf` to `path`.
 
-    method   : 'ROHF', 'UHF', 'RKS' or 'UKS'
+    method   : 'ROHF', 'UHF', 'RKS', 'UKS' or 'GVBPP'
     header   : the SCF section of the report as it was printed
     settings : the driver's keyword arguments (basis, xc, x2c, ...)
+    gvb      : for 'GVBPP', the converged gvbpp.GVBPP object; `mf` is then its
+               RHF/ROHF reference
     """
     from pyscf import lib
     from pyscf.scf import chkfile as scf_chk
@@ -234,6 +246,7 @@ def save(mf, path, method, header="", settings=None):
         "standard_orientation": bool(s.get("standard_orientation", True)),
         "converged": bool(getattr(mf, "converged", True)),
         "guess_chk": str(s.get("guess_chk") or ""),
+        "n_pairs": -1 if gvb is None else int(gvb.n_pairs),
         "header": str(header or ""),
         "command_line": "python " + " ".join(shlex.quote(a) for a in sys.argv),
         "created_utc": datetime.datetime.now(datetime.timezone.utc)
@@ -241,6 +254,19 @@ def save(mf, path, method, header="", settings=None):
         "pyscf_version": pyscf.__version__,
         "minpop_chk_version": __version__,
     }
+    if gvb is not None:
+        lib.chkfile.save(path, GVB_GROUP, {
+            "e_tot": float(gvb.e_tot),
+            "e_corr": float(gvb.e_corr),
+            "e_ref": float(mf.e_tot),
+            "mo_coeff": np.asarray(gvb.mo_coeff),      # core | b1 c1 b2 c2 .. | open | virtual
+            "occupations": np.asarray(gvb.occupations),
+            "overlaps": np.asarray(gvb.overlaps),
+            "ncore": int(gvb.ncore),
+            "n_pairs": int(gvb.n_pairs),
+            "n_open": int(gvb.n_open),
+            "converged": bool(gvb.converged),
+        })
     lib.chkfile.save(path, GROUP, meta)
     return path
 
@@ -422,7 +448,7 @@ def restore(path, method, verbose=True, explicit=None, labels=None,
     have = stored_method(rec, meta)
     if have and have != method:
         raise CheckpointError(
-            f"{path} holds a {have} wavefunction"
+            f"{path} holds a {'GVB-PP' if have == 'GVBPP' else have} wavefunction"
             + (f" (xc={meta.get('xc')})" if meta.get("xc") else "")
             + f", not {method}. Use {METHODS[have][3]} -read-chk {path}, or "
               f"`minpop-chk {path}`, which picks the driver itself.")
@@ -452,6 +478,84 @@ def restore(path, method, verbose=True, explicit=None, labels=None,
         print(f"Checkpoint file: {path} (read; SCF not rerun, {how})")
         sys.stdout.write(header if header.endswith("\n") else header + "\n")
     return mf, meta
+
+
+def load_gvbpp(path):
+    """The GVB-PP record of a checkpoint as a dict, or None when the file
+    holds none."""
+    from pyscf import lib
+    try:
+        rec = lib.chkfile.load(path, GVB_GROUP)
+    except Exception:
+        rec = None
+    if not rec or "mo_coeff" not in rec:
+        return None
+    return {k: (np.asarray(v) if k in ("mo_coeff", "occupations", "overlaps")
+                else _plain(v)) for k, v in rec.items()}
+
+
+def restore_gvbpp(path, verbose=True, explicit=None, atom_str=None,
+                  n_pairs=None):
+    """Rebuild what minpop_gvbpp() needs from a GVB-PP checkpoint, without an
+    SCF or a GVB-PP optimization. Returns (g, meta); g carries mol, ncore,
+    n_pairs, n_open, mo_coeff, occupations, overlaps, e_tot, e_corr and
+    converged, like a gvbpp.GVBPP object after kernel()."""
+    import types
+    mol, rec, meta = load(path)
+    gvb = load_gvbpp(path)
+    have = stored_method(rec, meta)
+    if gvb is None:
+        raise CheckpointError(
+            f"{path} holds no GVB-PP wavefunction"
+            + (f" (it is a {have} checkpoint: use {METHODS[have][3]} -read-chk "
+               f"{path})" if have in METHODS else
+               " (a plain PySCF chkfile has only SCF orbitals)")
+            + ". To run GVB-PP starting from it, use -guess-chk.")
+    if n_pairs is not None and int(n_pairs) != int(gvb["n_pairs"]):
+        raise CheckpointError(
+            f"{path} holds a GVB-PP wavefunction with {gvb['n_pairs']} pairs, "
+            f"not -npairs {n_pairs}. With -read-chk the pair count comes from "
+            f"the checkpoint. Drop the flag, or rerun without -read-chk.")
+    nact = int(gvb["ncore"]) + 2 * int(gvb["n_pairs"]) + int(gvb["n_open"])
+    c = gvb["mo_coeff"]
+    if c.shape[0] != mol.nao_nr() or c.shape[1] < nact:
+        raise CheckpointError(f"{path}: GVB-PP orbitals do not fit the stored "
+                              f"molecule ({c.shape} for {mol.nao_nr()} functions)")
+    _check_explicit(path, mol, meta, explicit)
+    if atom_str is not None:
+        check_geometry(path, mol, atom_str)
+    g = types.SimpleNamespace(
+        mol=mol, mo_coeff=c, occupations=gvb["occupations"],
+        overlaps=gvb["overlaps"], ncore=int(gvb["ncore"]),
+        n_pairs=int(gvb["n_pairs"]), n_open=int(gvb["n_open"]),
+        e_tot=float(gvb["e_tot"]), e_corr=float(gvb["e_corr"]),
+        converged=bool(gvb["converged"]))
+    if verbose:
+        header = (meta or {}).get("header") or ""
+        how = "the SCF and GVB-PP section below is the stored one"
+        if "Molecule:" not in header or "converged GVB-PP energy" not in header:
+            m = meta or {}
+            basis = m.get("basis") or (mol.basis if isinstance(mol.basis, str)
+                                       else "custom")
+            if m.get("basis_light"):
+                z = m.get("light_max_z", 18)
+                basis = f"{basis} on Z>{z}, {m['basis_light']} on Z<={z}"
+            out = [f"Molecule: {m.get('xyz_file') or path}",
+                   f"Charge: {mol.charge}, Multiplicity: {mol.spin + 1}",
+                   f"Basis: {basis} (5D/7F spherical)",
+                   f"Atoms: {mol.natm}, Electrons: {mol.nelectron}", ""]
+            if m.get("x2c"):
+                out.append("Hamiltonian: spin-free X2C-1e (scalar relativistic)"
+                           + (", atomic (atom-by-atom) decoupling"
+                              if m.get("x2c_atomic") else ""))
+            out += [_energy_line(float(rec["e_tot"])),
+                    f"GVB-PP: {g.n_pairs} pairs",
+                    f"converged GVB-PP energy = {g.e_tot:.10f}", ""]
+            header = "\n".join(out) + "\n"
+            how = "the SCF and GVB-PP section below is rebuilt from the file"
+        print(f"Checkpoint file: {path} (read; SCF and GVB-PP not rerun, {how})")
+        sys.stdout.write(header if header.endswith("\n") else header + "\n")
+    return g, meta
 
 
 # --------------------------------------------------------------------------- #
@@ -508,24 +612,7 @@ def _ao_rotation(mol, R):
     return sl.block_diag(*blocks)
 
 
-def guess_density(path, mol, method, verbose=True):
-    """Initial-guess density for a new SCF on `mol` from the wavefunction in
-    the checkpoint `path` (a MinPop checkpoint or a plain PySCF chkfile).
-
-    The stored occupied orbitals are rotated into the current frame when the
-    two geometries differ by a rigid motion, projected onto the current basis
-    when the basis differs, and orthonormalized, so the guess always holds the
-    right number of electrons. Method and functional may differ from the
-    current run; atoms, charge and multiplicity may not.
-
-    Returns the density in the form the driver's SCF takes: (alpha, beta) for
-    ROHF, UHF and UKS, the total density for RKS.
-    """
-    from pyscf import gto
-    from pyscf.scf import addons
-    if method not in METHODS:
-        raise CheckpointError(f"unknown method {method!r}")
-    cmol, rec, meta = load(path)
+def _check_same_system(path, cmol, mol):
     norm = lambda sym: re.sub(r"[^A-Za-z]", "", sym).capitalize()
     mine = [norm(mol.atom_pure_symbol(i)) for i in range(mol.natm)]
     theirs = [norm(cmol.atom_pure_symbol(i)) for i in range(cmol.natm)]
@@ -539,69 +626,161 @@ def guess_density(path, mol, method, verbose=True):
             f"{cmol.spin + 1}; this run has charge {mol.charge}, multiplicity "
             f"{mol.spin + 1}")
 
-    c = np.asarray(rec["mo_coeff"])
-    occ = np.asarray(rec["mo_occ"])
-    if c.ndim == 3:
-        orbs = [c[0][:, occ[0] > 0.5], c[1][:, occ[1] > 0.5]]
-    else:
-        orbs = [c[:, occ > 0.5], c[:, occ > 1.5]]
 
+def _transfer(cmol, mol, orbs):
+    """Carry orbital sets from the checkpoint molecule to the current one:
+    rotate them when the geometries differ by a rigid motion, project them
+    when the basis or the geometry differs. Not orthonormalized. Returns
+    (orbital sets, info) with info = {rotated, projected, rmsd (Bohr)}."""
+    from pyscf import gto
+    from pyscf.scf import addons
     R, rmsd, moved = _align(cmol.atom_coords(), mol.atom_coords())
     rotated = abs(R - np.eye(3)).max() > 1e-8
     if rotated:
         T = _ao_rotation(cmol, R)
         orbs = [T @ o for o in orbs]
-    shifted = abs(moved - cmol.atom_coords()).max() > 1e-10
-    if shifted:
+    if abs(moved - cmol.atom_coords()).max() > 1e-10:
         cmol = cmol.copy()
         cmol.set_geom_(moved, unit="Bohr")
     same_basis = (bool(cmol.cart) == bool(mol.cart)
                   and gto.same_basis_set(cmol, mol)
                   and cmol.nao_nr() == mol.nao_nr())
     project = not (same_basis and rmsd < 1e-6)
+    if project:
+        orbs = [addons.project_mo_nr2nr(cmol, o, mol) if o.shape[1] else
+                np.zeros((mol.nao_nr(), 0)) for o in orbs]
+    return orbs, {"rotated": rotated, "projected": project, "rmsd": rmsd}
 
+
+def _lowdin(o, S, path):
+    """Symmetric orthonormalization: the closest orthonormal set, same order."""
+    w, v = np.linalg.eigh(o.T @ S @ o)
+    if w.min() < 1e-6:
+        raise CheckpointError(
+            f"-guess-chk {path}: the stored orbitals become linearly "
+            f"dependent in the current basis, so they are no use as a guess")
+    return o @ (v / np.sqrt(w)) @ v.T
+
+
+def _how(info):
+    steps = []
+    if info["rotated"]:
+        steps.append("rotated into the current frame")
+    if info["projected"]:
+        steps.append("projected onto the current basis" if info["rmsd"] < 1e-6
+                     else "projected onto the current basis and geometry")
+    return ", ".join(steps) if steps else "used as stored"
+
+
+def _source_label(cmol, rec, meta):
+    m = meta or {}
+    c = np.asarray(rec["mo_coeff"])
+    src = m.get("method") or ("unrestricted" if c.ndim == 3 else "restricted")
+    if src == "GVBPP":
+        src = "RHF/ROHF reference of a GVB-PP run"
+    if m.get("xc"):
+        src += f"/{m['xc']}"
+    basis = m.get("basis") or (cmol.basis if isinstance(cmol.basis, str)
+                               else "custom basis")
+    if m.get("basis_light"):
+        basis += f" + {m['basis_light']}"
+    return src, basis
+
+
+def guess_density(path, mol, method, verbose=True):
+    """Initial-guess density for a new SCF on `mol` from the wavefunction in
+    the checkpoint `path` (a MinPop checkpoint or a plain PySCF chkfile).
+
+    The stored occupied orbitals are rotated into the current frame when the
+    two geometries differ by a rigid motion, projected onto the current basis
+    when the basis differs, and orthonormalized, so the guess always holds the
+    right number of electrons. Method and functional may differ from the
+    current run; atoms, charge and multiplicity may not. For a GVB-PP
+    checkpoint the orbitals are those of its RHF/ROHF reference.
+
+    Returns the density in the form the driver's SCF takes: (alpha, beta) for
+    ROHF, UHF and UKS, the total density for RKS (and for a closed-shell RHF
+    reference, method='RHF').
+    """
+    if method not in METHODS and method != "RHF":
+        raise CheckpointError(f"unknown method {method!r}")
+    cmol, rec, meta = load(path)
+    _check_same_system(path, cmol, mol)
+    c = np.asarray(rec["mo_coeff"])
+    occ = np.asarray(rec["mo_occ"])
+    if c.ndim == 3:
+        orbs = [c[0][:, occ[0] > 0.5], c[1][:, occ[1] > 0.5]]
+    else:
+        orbs = [c[:, occ > 0.5], c[:, occ > 1.5]]
+    orbs, info = _transfer(cmol, mol, orbs)
     S = mol.intor("int1e_ovlp")
     dms = []
     for o in orbs:
         if o.shape[1] == 0:
             dms.append(np.zeros_like(S))
             continue
-        if project:
-            o = addons.project_mo_nr2nr(cmol, o, mol)
-        w, v = np.linalg.eigh(o.T @ S @ o)
-        if w.min() < 1e-6:
-            raise CheckpointError(
-                f"-guess-chk {path}: the stored orbitals become linearly "
-                f"dependent in the current basis, so they are no use as a guess")
-        o = o @ (v / np.sqrt(w)) @ v.T
+        o = _lowdin(o, S, path)
         dms.append(o @ o.T)
     dma, dmb = dms
-
     if verbose:
-        m = meta or {}
-        src = m.get("method") or ("unrestricted" if c.ndim == 3 else "restricted")
-        if m.get("xc"):
-            src += f"/{m['xc']}"
-        basis = m.get("basis") or (cmol.basis if isinstance(cmol.basis, str)
-                                   else "custom basis")
-        if m.get("basis_light"):
-            basis += f" + {m['basis_light']}"
-        steps = []
-        if rotated:
-            steps.append("rotated into the current frame")
-        if project:
-            steps.append("projected onto the current basis"
-                         if rmsd < 1e-6 else
-                         "projected onto the current basis and geometry")
-        how = ", ".join(steps) if steps else "used as stored"
+        src, basis = _source_label(cmol, rec, meta)
         print(f"Initial guess: checkpoint file {path} ({src}, {basis}, "
-              f"E = {float(rec['e_tot']):.9f}; {how})")
-        if rmsd > 1e-3:
+              f"E = {float(rec['e_tot']):.9f}; {_how(info)})")
+        if info["rmsd"] > 1e-3:
             print(f"Initial guess: the checkpoint geometry differs from this "
-                  f"one, RMSD {rmsd * 0.529177210903:.4f} A after alignment")
-    if method == "RKS":
+                  f"one, RMSD {info['rmsd'] * 0.529177210903:.4f} A after alignment")
+    if method in ("RKS", "RHF"):
         return dma + dmb
     return np.array([dma, dmb])
+
+
+def gvb_start_orbitals(path, mol, mf, n_pairs, verbose=True):
+    """Starting orbitals for a GVB-PP optimization on `mol` from the GVB-PP
+    wavefunction stored in `path`, or None when the file has none that fits
+    (no GVB-PP record, another pair count, another core).
+
+    The stored core, pair (bonding, correlating, ...) and open-shell natural
+    orbitals are carried over like an SCF guess (rotated, projected), then
+    orthonormalized in their stored order, which is the order gvbpp expects
+    of a user start. The virtual space is the orthogonal complement, built
+    from the reference orbitals in `mf`.
+    """
+    gvb = load_gvbpp(path)
+    say = print if verbose else (lambda *a, **k: None)
+    if gvb is None:
+        return None
+    cmol, rec, meta = load(path)
+    _check_same_system(path, cmol, mol)
+    occ = np.asarray(mf.mo_occ)
+    ndocc, nopen = int((occ > 1.5).sum()), int(((occ > 0.5) & (occ < 1.5)).sum())
+    ncore = ndocc - int(n_pairs)
+    if int(gvb["n_pairs"]) != int(n_pairs):
+        say(f"GVB-PP start: {path} holds {gvb['n_pairs']} pairs, this run has "
+            f"{n_pairs}; its GVB-PP orbitals are not used (the reference SCF "
+            f"still starts from it)")
+        return None
+    if int(gvb["ncore"]) != ncore or int(gvb["n_open"]) != nopen:
+        say(f"GVB-PP start: {path} has {gvb['ncore']} core orbitals, this run "
+            f"has {ncore} (different ECP or core); its GVB-PP orbitals are "
+            f"not used")
+        return None
+    nact = ncore + 2 * int(n_pairs) + nopen
+    (o,), info = _transfer(cmol, mol, [gvb["mo_coeff"][:, :nact]])
+    S = mol.intor("int1e_ovlp")
+    o = _lowdin(o, S, path)
+    # virtual space: what is left of the reference orbitals
+    cref = np.asarray(mf.mo_coeff)
+    rest = cref - o @ (o.T @ S @ cref)
+    w, v = np.linalg.eigh(rest.T @ S @ rest)
+    nvir = cref.shape[1] - nact
+    keep = np.argsort(w)[::-1][:nvir]
+    if nvir and w[keep].min() < 1e-8:
+        raise CheckpointError(f"-guess-chk {path}: cannot complete the "
+                              f"virtual space around the stored GVB-PP orbitals")
+    vir = rest @ (v[:, keep] / np.sqrt(w[keep]))
+    say(f"GVB-PP start: natural orbitals of {path} ({gvb['n_pairs']} pairs, "
+        f"E = {float(gvb['e_tot']):.9f}; {_how(info)})")
+    return np.hstack([o, vir])
 
 
 # --------------------------------------------------------------------------- #
@@ -612,8 +791,10 @@ def run_with_checkpoint(method, scf_func, analyse_func, scf_kwargs,
                         read_xyz=None):
     """Get the wavefunction (SCF or checkpoint), then run the MinPop analysis.
 
-    method         : 'ROHF', 'UHF', 'RKS' or 'UKS'
+    method         : 'ROHF', 'UHF', 'RKS', 'UKS' or 'GVBPP'
     scf_func       : the driver's SCF routine; returns the converged mf
+                     (for 'GVBPP': the converged GVBPP object, whose .mf is
+                     the reference)
     analyse_func   : the driver's minpop_<method>(mf, ...)
     scf_kwargs     : keyword arguments of scf_func
     analyse_kwargs : keyword arguments of analyse_func
@@ -627,6 +808,11 @@ def run_with_checkpoint(method, scf_func, analyse_func, scf_kwargs,
         atom_str = None
         if scf_kwargs.get("xyz_file") and read_xyz is not None:
             atom_str = read_xyz(scf_kwargs["xyz_file"])
+        if method == "GVBPP":
+            g, _ = restore_gvbpp(read_chk, verbose=verbose, explicit=explicit,
+                                 atom_str=atom_str,
+                                 n_pairs=(explicit or {}).get("n_pairs"))
+            return analyse_func(g, **analyse_kwargs)
         mf, _ = restore(read_chk, method, verbose=verbose, explicit=explicit,
                         labels=explicit, atom_str=atom_str)
         return analyse_func(mf, **analyse_kwargs)
@@ -635,7 +821,11 @@ def run_with_checkpoint(method, scf_func, analyse_func, scf_kwargs,
         with recording() as buf:
             mf = scf_func(**scf_kwargs)
         try:
-            save(mf, chk, method, header=buf.getvalue(), settings=scf_kwargs)
+            if method == "GVBPP":      # scf_func returned the GVBPP object
+                save(mf.mf, chk, method, header=buf.getvalue(),
+                     settings=scf_kwargs, gvb=mf)
+            else:
+                save(mf, chk, method, header=buf.getvalue(), settings=scf_kwargs)
             if verbose:
                 print(f"Checkpoint file: {chk} (written; reuse with -read-chk)")
                 print()
@@ -741,7 +931,8 @@ def describe(path):
         out.append(f"  written by MinPop       : yes (minpop-chk format "
                    f"{m.get('format_version')}, PySCF {m.get('pyscf_version')}, "
                    f"{m.get('created_utc')})")
-        out.append(f"  method                  : {m.get('method')}"
+        out.append(f"  method                  : "
+                   f"{'GVB-PP' if m.get('method') == 'GVBPP' else m.get('method')}"
                    + (f"  xc={m['xc']}  grid level="
                       f"{'default' if m.get('grid_level', -1) == -1 else m['grid_level']}"
                       if m.get("xc") else ""))
@@ -777,6 +968,16 @@ def describe(path):
     if unres:
         ss, s = _spin_square(mol, rec["mo_coeff"], rec["mo_occ"])
         out.append(f"  <S^2>, 2S+1             : {ss:.6f}, {s:.6f}")
+    gvb = load_gvbpp(path)
+    if gvb is not None:
+        out[-1] = out[-1].replace("SCF energy (Eh)         ", "reference SCF energy    ")
+        out.append(f"  GVB-PP energy (Eh)      : {float(gvb['e_tot']):.12f}  "
+                   f"(correlation {float(gvb['e_corr']):.6f})")
+        out.append(f"  GVB-PP space            : {gvb['ncore']} core, "
+                   f"{gvb['n_pairs']} pairs, {gvb['n_open']} open-shell orbitals")
+        o = np.asarray(gvb["occupations"]).reshape(-1, 2)
+        out.append("  pair occupations        : "
+                   + "  ".join(f"{a:.4f}/{b:.4f}" for a, b in o))
     if meta:
         out.append(f"  reproject with          : {METHODS[m['method']][3]} "
                    f"-read-chk {path} -minimal-basis NAME   (or minpop-chk "
@@ -790,7 +991,8 @@ def main(argv=None):
         prog="minpop-chk",
         description="Reproject a MinPop / PySCF checkpoint onto a minimal "
                     "basis without rerunning the SCF. The driver that wrote "
-                    "the checkpoint (ROHF, UHF, RKS or UKS) is chosen from "
+                    "the checkpoint (ROHF, UHF, RKS, UKS or GVB-PP) is chosen "
+                    "from "
                     "the file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.4.0 (2026-11-22)
+
+Added
+- Checkpoint files for GVB-PP. `minpop-gvbpp` writes the reference RHF/ROHF and the GVB-PP wavefunction (natural orbitals, pair occupations and overlaps, energies, core / pair / open counts) to a PySCF chkfile: `-chk FILE`, default `<xyz name>_gvbpp.chk`, `-no-chk` to skip.
+- `minpop-gvbpp -read-chk FILE` (and `minpop-chk FILE`) reprojects a stored GVB-PP wavefunction with no SCF and no GVB-PP optimization. `-xyz` and `-npairs` are optional; `-minimal-basis`, `-no-keep` and the other projection flags apply. Works without the `gvbpp` package.
+- `minpop-gvbpp -guess-chk FILE` starts the reference SCF from the file and, for a GVB-PP checkpoint with the same pair count, the GVB-PP optimization from its natural orbitals (new start `checkpoint`, `-gvb-guess checkpoint`). The stored start replaces the multi-start unless `-gvb-guess` or `-gvb-trials` is given.
+- A GVB-PP checkpoint also serves as `-guess-chk` for the HF and KS drivers (its reference orbitals).
+- `minpop-chk FILE -info` reports the GVB-PP energy, correlation energy, orbital space and pair occupations.
+- `run_gvbpp_from_xyz(..., chk=, read_chk=, guess_chk=)` in the Python API.
+
+Changed
+- `minpop_gvbpp.py` imports `gvbpp` lazily and names the missing package only when a GVB-PP run is requested.
+
 ## 2.3.0 (2026-11-22)
 
 Added

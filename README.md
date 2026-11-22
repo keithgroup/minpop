@@ -148,7 +148,7 @@ MBS bond populations resolved by symmetry (σ, π, δ, φ)    [with -symmetry]
 | `-label-style {gaussian, physical}` | orbital labels as Gaussian prints them, a running shell counter (Si 3d = 4D, Pt 5d = 9D), or by principal quantum number (3D, 5D). Default: Gaussian's for `sto-3g` and `sto-3g-ano`, physical for `ano-rcc-mb`. Labels only |
 | `-soscf`, `-guess`, `-stable`, `-guessmix`, `-max-cycle` | SCF convergence: Newton solver, initial guess, stability analysis, broken-symmetry mixing |
 | `-json FILE`, `-csv-long FILE` | machine-readable export of everything the report prints (JSON schema 1.4, tidy CSV); all five drivers; see §10 |
-| `-chk FILE`, `-no-chk`, `-read-chk FILE`, `-guess-chk FILE` | checkpoint of the converged SCF: name it, switch it off, read one and skip the SCF, or start a new SCF from one (ROHF, UHF, RKS, UKS drivers); see §11 |
+| `-chk FILE`, `-no-chk`, `-read-chk FILE`, `-guess-chk FILE` | checkpoint of the converged SCF: name it, switch it off, read one and skip the SCF, or start a new SCF from one (all five drivers, GVB-PP included); see §11 |
 | `-npairs N`, `-gvb-trials N`, `-gvb-seed N`, `-gvb-window N`, `-no-keep X` | GVB-PP driver only; see §9 |
 
 `-h` on any driver lists everything.
@@ -263,6 +263,8 @@ For each pair: the occupations, the GVB overlap S_ab between the two singly occu
 
 Practicalities. The pair search is restricted to valence orbitals (`-gvb-window`, automatic: Ar core frozen for K to Kr, Kr core for Rb to Xe, Xe + 4f for Cs to Rn), so semicore 3s/3p orbitals are never correlated in place of a bond; a pair that still looks core-like is flagged. Perfect-pairing energy surfaces of metal dimers have several minima: use `-gvb-trials 8` with two `-gvb-seed` values and keep the lowest energy. For Cr₂, nineteen of twenty starts converge to a solution 36 kcal/mol above the one with paired δ electrons.
 
+Checkpoints: every GVB-PP run stores its wavefunction, `-read-chk` reprojects it without a new optimization, and `-guess-chk` starts a new optimization from it; see §11.
+
 GVB-PP contains pair (static) correlation and no dynamic correlation. For Cr₂ at 1.679 Å, same basis and projection:
 
 | Cr–Cr bond population | RHF | PBE | GVB-PP |
@@ -306,7 +308,7 @@ rec["symmetry"]["shells"]["labels"], rec["symmetry"]["shells"]["all_electrons"][
 
 ## 11. Checkpoint files
 
-The SCF is the expensive step and the projection is cheap. Every ROHF, UHF, RKS and UKS run therefore stores its converged SCF in a checkpoint file, and any later run can project that stored wavefunction onto another minimal basis without repeating the SCF.
+The SCF is the expensive step and the projection is cheap. Every run (ROHF, UHF, RKS, UKS, and GVB-PP) therefore stores its converged wavefunction in a checkpoint file, and any later run can project that stored wavefunction onto another minimal basis without repeating the SCF.
 
 **For practitioners.** Run once, then reproject as often as needed:
 
@@ -323,10 +325,10 @@ minpop-chk rhco3.chk -info
 
 | Flag | Where | Meaning |
 |---|---|---|
-| `-chk FILE` | four drivers | name of the checkpoint to write. Default: `<xyz name>_<method>.chk` in the current directory, for example `rhco3_uks.chk` |
-| `-no-chk` | four drivers | write no checkpoint |
-| `-read-chk FILE` | four drivers | read the SCF from `FILE` and skip it. `-xyz` becomes optional |
-| `-guess-chk FILE` | four drivers | run the SCF, started from the wavefunction in `FILE` |
+| `-chk FILE` | all drivers | name of the checkpoint to write. Default: `<xyz name>_<method>.chk` in the current directory, for example `rhco3_uks.chk` |
+| `-no-chk` | all drivers | write no checkpoint |
+| `-read-chk FILE` | all drivers | read the SCF from `FILE` and skip it. `-xyz` becomes optional |
+| `-guess-chk FILE` | all drivers | run the SCF, started from the wavefunction in `FILE` |
 | `FILE` | `minpop-chk` | the checkpoint; every other flag passes through to the driver |
 | `-info` | `minpop-chk` | print what the checkpoint holds and exit |
 | `-method {rohf,uhf,rks,uks}` | `minpop-chk` | driver for a plain PySCF chkfile (a MinPop checkpoint names its own) |
@@ -364,7 +366,25 @@ res = run_uks_from_xyz(read_chk="rhco3.chk", minimal_basis="minao", verbose=Fals
 res = run_uks_from_xyz("rhco3.xyz", multiplicity=2, basis="def2-qzvpp", guess_chk="rhco3.chk")
 ```
 
-The GVB-PP driver does not write checkpoints yet.
+**GVB-PP checkpoints.** `minpop-gvbpp` uses the same four flags. Its checkpoint holds the RHF/ROHF reference in the standard `scf` group and the GVB-PP wavefunction in a `gvbpp` group: natural orbitals (core, bonding and correlating orbital of each pair, open shells, virtuals), pair occupations and overlaps, both energies, and the core / pair / open counts. The default name is `<xyz name>_gvbpp.chk`.
+
+```bash
+minpop-gvbpp -xyz xyz/cr2.xyz -npairs 6 -basis ano-rcc-vdzp -x2c -soscf -gvb-trials 20 \
+             -minimal-basis ano-rcc-mb -symmetry-shells -chk cr2.chk > cr2_anorccmb.out
+
+minpop-gvbpp -read-chk cr2.chk -minimal-basis ano-rcc-mb-occ -symmetry-shells > cr2_anorccmb_occ.out
+minpop-chk cr2.chk -minimal-basis sto-3g-ano -no-keep 0.9 > cr2_keep09.out
+minpop-chk cr2.chk -info
+
+minpop-gvbpp -xyz xyz/cr2.xyz -npairs 6 -basis ano-rcc-vtzp -x2c -soscf \
+             -minimal-basis ano-rcc-mb -guess-chk cr2.chk -chk cr2_vtzp.chk > cr2_vtzp.out
+```
+
+- `-read-chk` skips the SCF and the GVB-PP optimization. `-xyz` and `-npairs` become optional; the pair count comes from the file, and an `-npairs` that disagrees stops the run. Besides the projection flags listed above, `-no-keep` applies, so you can change how correlating orbitals are kept or merged without a new optimization. The multi-start flags (`-gvb-guess`, `-gvb-trials`, `-gvb-seed`, `-gvb-window`) are ignored with a note. A reprojection does not need the `gvbpp` package.
+- `-guess-chk` runs both steps, started from the file. The reference SCF starts from the file's SCF orbitals, whatever driver wrote it. If the file is a GVB-PP checkpoint with the same pair count and core, the GVB-PP optimization starts from its natural orbitals (rotated, projected onto the new basis, orthonormalized in the stored pair order), and that start replaces the multi-start. Give `-gvb-guess` or `-gvb-trials` explicitly to run those starts as well; the lowest energy wins. This carries a minimum that took many starts to find, such as Cr₂, into a larger basis in one optimization.
+- A GVB-PP checkpoint cannot be reprojected by `minpop-rohf`, and an HF or KS checkpoint has no GVB-PP wavefunction for `minpop-gvbpp -read-chk`; both errors name the right command. Either kind works as a `-guess-chk` for any driver.
+
+In Python, `run_gvbpp_from_xyz` takes `chk=`, `read_chk=` and `guess_chk=` like the other drivers.
 
 ---
 
@@ -396,7 +416,7 @@ Return dictionaries hold `dm_alpha`, `dm_beta`, `dm_total`, `dm_spin`, `pop_tota
 - **σ/π/δ/φ.** Classes sum to the overlap population to 10⁻¹²; invariant under rotation of the molecule; selection rule asserted on every pair; the generic orbital ordering reproduces the legacy Gaussian order on H₂O, SiH₄, ScH, CuCl, SnH₄.
 - **GVB-PP.** H₂ reproduces CAS(2,2); H₂O keeps the O–H correlating orbitals and merges the lone-pair ones; triplet CH₂; CrH, CrO, Cr₂ in `examples/outputs/`.
 - JSON schema 1.2: tests compare the record with the printed report field by field (projection completeness, S², symmetry matrices and their sum rule, shell matrices condensing to atom matrices, the GVB-PP pair table); a live `-json` record and one re-parsed from the saved report are identical apart from the source file name.
-- **Checkpoints.** A reprojection with `-read-chk` reproduces a direct run with the same minimal basis to 10⁻¹³ in every printed number (ROHF, UHF, RKS, UKS; X2C with a mixed basis; ECP). A `-guess-chk` start reaches the same SCF energy as the default guess, and stored orbitals rotated into another frame reproduce the stored energy to 10⁻¹², spherical and Cartesian.
+- **Checkpoints.** A reprojection with `-read-chk` reproduces a direct run with the same minimal basis to 10⁻¹³ in every printed number (ROHF, UHF, RKS, UKS; X2C with a mixed basis; ECP). For GVB-PP the analysis of a wavefunction read back from its checkpoint is identical, character for character, to the analysis before writing (H₂O, triplet CH₂, CrH with X2C; four projections each), and a GVB-PP optimization started from a stored one in another basis reaches the energy of the best multi-start. A `-guess-chk` start reaches the same SCF energy as the default guess, and stored orbitals rotated into another frame reproduce the stored energy to 10⁻¹², spherical and Cartesian.
 - `pytest -q` runs the suite in under a minute.
 
 Worked outputs for Pt₂, PtO, PtH (PBE) and CrH, CrO, Cr₂ (GVB-PP, RHF, PBE) are in `examples/outputs/`, produced by `examples/run_pt_pbe.sh` and `examples/run_cr_gvbpp.sh`.

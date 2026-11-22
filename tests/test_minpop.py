@@ -11,9 +11,18 @@ PKG = os.path.join(HERE, "..", "minpop")
 O_CHARGE_H2O_631G = -0.611678   # ROHF/6-31G -> STO-3G MBS, Gaussian-validated path
 
 
-def run(script, *args):
+import tempfile
+WORK = tempfile.mkdtemp(prefix="minpop_tests_")   # default checkpoints land here
+
+
+def run(script, *args, ok=True):
     cmd = [sys.executable, os.path.join(PKG, script), *args]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                         cwd=WORK, env=env)
+    if not ok:
+        assert out.returncode != 0
+        return out.stderr
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
     return out.stdout
 
@@ -117,7 +126,8 @@ def _run_json(script, tmp_path, *args):
     js = tmp_path / "rec.json"
     cmd = [sys.executable, os.path.join(PKG, script), *args, "-json", str(js)]
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env,
+                         cwd=WORK)
     assert out.returncode == 0, out.stdout[-1500:] + out.stderr[-1500:]
     return out.stdout, json.loads(js.read_text())
 
@@ -125,7 +135,7 @@ def _run_json(script, tmp_path, *args):
 def test_json_uhf_matches_report(tmp_path):
     text, rec = _run_json("minpop_uhf.py", tmp_path, "-xyz", f"{XYZ}/ch2.xyz", "-mult", "3",
                           "-basis", "6-31G", "-symmetry-shells")
-    assert rec["schema_version"] == "1.2"
+    assert rec["schema_version"] == "1.3"
     assert rec["method"]["name"] == "uhf" and rec["method"]["label"] == "UHF"
     assert rec["method"]["basis_full"] == "6-31G" and rec["method"]["spherical"] is True
     assert rec["method"]["minimal_basis"].startswith("STO-3G")
@@ -197,3 +207,82 @@ def test_json_gvbpp(tmp_path):
     assert len(g["trials"]) >= 2 and min(t["energy_hartree"] for t in g["trials"]) == pytest.approx(g["energy_hartree"], abs=1e-8)
     assert rec["scf"]["n_alpha"] == 5 and rec["scf"]["n_beta"] == 5
     assert rec["projection"]["completeness"][0]["label"].startswith("natural orbitals")
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint files: keep the SCF, reproject it without rerunning it
+# ---------------------------------------------------------------------------
+def _no_bookkeeping(text):
+    return [l for l in text.splitlines()
+            if l.strip() and not l.startswith(("Command line:", "Checkpoint file:"))]
+
+
+def test_chk_written_by_default(tmp_path):
+    run("minpop_rohf.py", "-xyz", f"{XYZ}/h2o.xyz", "-basis", "6-31G")
+    assert os.path.isfile(os.path.join(WORK, "h2o_rohf.chk"))
+    text = run("minpop_rohf.py", "-read-chk", "h2o_rohf.chk")
+    assert abs(charges(text)[0, 0] - O_CHARGE_H2O_631G) < 5e-6
+
+
+def test_chk_reprojection_equals_direct_run(tmp_path):
+    chk = str(tmp_path / "ch2.chk")
+    base = ("-xyz", f"{XYZ}/ch2.xyz", "-mult", "3", "-basis", "6-31G*")
+    first = run("minpop_uks.py", *base, "-chk", chk)
+    assert "Checkpoint file:" in first and "(written" in first
+    direct = run("minpop_uks.py", *base, "-no-chk", "-minimal-basis", "minao",
+                 "-symmetry-shells")
+    again = run("minpop_uks.py", "-read-chk", chk, "-minimal-basis", "minao",
+                "-symmetry-shells")
+    assert "(read; SCF not rerun" in again
+    a, b = _no_bookkeeping(direct), _no_bookkeeping(again)
+    assert len(a) == len(b)
+    assert np.allclose(charges(direct), charges(again), atol=1e-6)
+    num = re.compile(r"-?\d+\.\d+")
+    for la, lb in zip(a, b):
+        if la.startswith("WARN"):
+            continue
+        fa, fb = [float(x) for x in num.findall(la)], [float(x) for x in num.findall(lb)]
+        assert len(fa) == len(fb) and np.allclose(fa, fb, atol=2e-5), (la, lb)
+    # same SCF, a different projection: the stored energy line is reused
+    assert [l for l in b if "converged SCF energy" in l] == \
+           [l for l in _no_bookkeeping(first) if "converged SCF energy" in l]
+
+
+def test_chk_tool_picks_the_driver_and_json(tmp_path):
+    chk = str(tmp_path / "h2o.chk")
+    run("minpop_rks.py", "-xyz", f"{XYZ}/h2o.xyz", "-basis", "6-31G", "-xc", "b3lyp",
+        "-chk", chk)
+    info = run("minpop_chk.py", chk, "-info")
+    assert "RKS" in info and "b3lyp" in info
+    js = tmp_path / "r.json"
+    text = run("minpop_chk.py", chk, "-minimal-basis", "ano-rcc-mb", "-json", str(js))
+    assert "MinPop Analysis" in text and "ANO-RCC-MB" in text
+    rec = json.loads(js.read_text())
+    assert rec["source"]["checkpoint"] == {"path": chk, "mode": "read"}
+    assert rec["method"]["name"] == "rks" and rec["method"]["xc"] == "b3lyp"
+    assert rec["scf"]["energy_hartree"] is not None
+
+
+def test_chk_refuses_a_mismatch(tmp_path):
+    chk = str(tmp_path / "ch2.chk")
+    run("minpop_uhf.py", "-xyz", f"{XYZ}/ch2.xyz", "-mult", "3", "-basis", "6-31G",
+        "-chk", chk)
+    assert "holds a UHF wavefunction" in run("minpop_uks.py", "-read-chk", chk, ok=False)
+    err = run("minpop_uhf.py", "-read-chk", chk, "-basis", "cc-pVDZ", ok=False)
+    assert "does not match the command line" in err
+    err = run("minpop_uhf.py", "-read-chk", chk, "-xyz", f"{XYZ}/h2o.xyz", ok=False)
+    assert "-xyz file lists" in err
+
+
+def test_chk_plain_pyscf_file(tmp_path):
+    from pyscf import gto, scf
+    chk = str(tmp_path / "plain.chk")
+    mol = gto.M(atom="O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692",
+                basis="6-31g", verbose=0)
+    mf = scf.RHF(mol)
+    mf.chkfile = chk
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    text = run("minpop_chk.py", chk)
+    assert "rebuilt from the file" in text
+    assert abs(charges(text)[0, 0] - O_CHARGE_H2O_631G) < 2e-3

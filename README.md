@@ -20,9 +20,10 @@
 8. [σ, π, δ, φ bond populations](#8-σ-π-δ-φ-bond-populations)
 9. [GVB-PP wavefunctions](#9-gvb-pp-wavefunctions)
 10. [JSON and CSV export](#10-json-and-csv-export)
-11. [Python API](#11-python-api)
-12. [Validation](#12-validation)
-13. [References](#13-references)
+11. [Checkpoint files](#11-checkpoint-files)
+12. [Python API](#12-python-api)
+13. [Validation](#13-validation)
+14. [References](#14-references)
 
 ---
 
@@ -134,10 +135,11 @@ MBS bond populations resolved by symmetry (σ, π, δ, φ)    [with -symmetry]
 | `minpop-uks` | `minpop_uks.py` | UKS | α − β |
 | `minpop-gvbpp` | `minpop_gvbpp.py` | GVB perfect pairing (gvbpp) | open shells |
 | `minpop-export` | `minpop_json_csv.py` | | JSON / CSV export of finished reports |
+| `minpop-chk` | `minpop_chk.py` | any stored ROHF / UHF / RKS / UKS | reprojects a checkpoint without an SCF; see §11 |
 
 | Option | Meaning |
 |---|---|
-| `-xyz FILE -charge N -mult M` | geometry (Å), charge, multiplicity 2S+1 |
+| `-xyz FILE -charge N -mult M` | geometry (Å), charge, multiplicity 2S+1. `-xyz` is optional with `-read-chk` |
 | `-basis NAME` | computational basis: any PySCF name, `cbsb3`, `cbsb7`, `ano-rcc-vdzp` / `-vtzp` / `-vqzp` / `-mb`, a `.py` basis file, or `module:DICT` |
 | `-basis-light NAME`, `-light-max-z Z` | basis for atoms with Z ≤ 18 (Ar); `-basis` then covers only the heavier atoms. ECPs are detected per side |
 | `-minimal-basis NAME` | projection target: `sto-3g` (default), `ano-rcc-mb`, `ano-rcc-mb-occ`, `sto-3g-ano`, `sto-3g-ano-occ`, `minao`, or `LIGHT+HEAVY` such as `sto-3g+ano-rcc-mb` or `sto-3g+minao` (LIGHT on Z ≤ `-light-max-z`, HEAVY on the rest); see §7 |
@@ -145,7 +147,8 @@ MBS bond populations resolved by symmetry (σ, π, δ, φ)    [with -symmetry]
 | `-symmetry`, `-symmetry-shells` | σ/π/δ/φ matrices condensed to atoms, and additionally to shells (`-sigma-pi` is an accepted alias) |
 | `-label-style {gaussian, physical}` | orbital labels as Gaussian prints them, a running shell counter (Si 3d = 4D, Pt 5d = 9D), or by principal quantum number (3D, 5D). Default: Gaussian's for `sto-3g` and `sto-3g-ano`, physical for `ano-rcc-mb`. Labels only |
 | `-soscf`, `-guess`, `-stable`, `-guessmix`, `-max-cycle` | SCF convergence: Newton solver, initial guess, stability analysis, broken-symmetry mixing |
-| `-json FILE`, `-csv-long FILE` | machine-readable export of everything the report prints (JSON schema 1.2, tidy CSV); all five drivers; see §10 |
+| `-json FILE`, `-csv-long FILE` | machine-readable export of everything the report prints (JSON schema 1.3, tidy CSV); all five drivers; see §10 |
+| `-chk FILE`, `-no-chk`, `-read-chk FILE` | checkpoint of the converged SCF: name it, switch it off, or read one and skip the SCF (ROHF, UHF, RKS, UKS drivers); see §11 |
 | `-npairs N`, `-gvb-trials N`, `-gvb-seed N`, `-gvb-window N`, `-no-keep X` | GVB-PP driver only; see §9 |
 
 `-h` on any driver lists everything.
@@ -278,7 +281,7 @@ A single determinant fills every bonding orbital and empties every antibonding o
 
 | Block | Content |
 |---|---|
-| `source` | file, sha256 of the report, code, `command_line` |
+| `source` | file, sha256 of the report, code, `command_line`, `checkpoint` (`{path, mode}` with mode `written` or `read`; `null` without a checkpoint; schema 1.3) |
 | `system` | charge, multiplicity, natoms, nelectrons |
 | `method` | `name` (`rohf`, `uhf`, `rks`, `uks`, `gvbpp`), `label`, `basis_full`, `basis_heavy` / `basis_light` / `light_max_z` for mixed bases, `spherical`, `ecp`, `hamiltonian` (`text`, `x2c`, `atomic_decoupling`), `xc`, `grid_level`, `minimal_basis`, `scf_solver` |
 | `geometry` | atomic numbers and symbols (whole periodic table), standard and input orientation |
@@ -301,7 +304,57 @@ rec["symmetry"]["shells"]["labels"], rec["symmetry"]["shells"]["all_electrons"][
 
 ---
 
-## 11. Python API
+## 11. Checkpoint files
+
+The SCF is the expensive step and the projection is cheap. Every ROHF, UHF, RKS and UKS run therefore stores its converged SCF in a checkpoint file, and any later run can project that stored wavefunction onto another minimal basis without repeating the SCF.
+
+**For practitioners.** Run once, then reproject as often as needed:
+
+```bash
+minpop-uks -xyz rhco3.xyz -mult 2 -xc pbe -basis x2c-tzvppall -basis-light "6-31G*" \
+           -x2c-atomic -minimal-basis sto-3g-ano-occ -chk rhco3.chk > rhco3_sto3g_ano_occ.out
+
+minpop-uks -read-chk rhco3.chk -minimal-basis minao+ano-rcc-mb-occ -symmetry-shells > rhco3_minao.out
+minpop-chk rhco3.chk -minimal-basis ano-rcc-mb -json rhco3_anorccmb.json > rhco3_anorccmb.out
+minpop-chk rhco3.chk -info
+```
+
+`minpop-chk FILE` reads the method from the file and calls the matching driver, so it works for every checkpoint. `minpop-chk FILE -info` prints the method, functional, basis, Hamiltonian, charge, multiplicity, energy, ⟨S²⟩ and the original command.
+
+| Flag | Where | Meaning |
+|---|---|---|
+| `-chk FILE` | four drivers | name of the checkpoint to write. Default: `<xyz name>_<method>.chk` in the current directory, for example `rhco3_uks.chk` |
+| `-no-chk` | four drivers | write no checkpoint |
+| `-read-chk FILE` | four drivers | read the SCF from `FILE` and skip it. `-xyz` becomes optional |
+| `FILE` | `minpop-chk` | the checkpoint; every other flag passes through to the driver |
+| `-info` | `minpop-chk` | print what the checkpoint holds and exit |
+| `-method {rohf,uhf,rks,uks}` | `minpop-chk` | driver for a plain PySCF chkfile (a MinPop checkpoint names its own) |
+
+With `-read-chk` (and with `minpop-chk`) these flags apply as usual: `-minimal-basis`, `-light-max-z` (the minimal-basis split), `-label-style`, `-symmetry`, `-symmetry-shells`, `-no-azimuthal-gauge`, `-json`, `-json-xyz-dir`, `-csv-long`, `-csv-sparse-tol`, `-q`.
+
+These settings define the SCF, so they come from the file: `-charge`, `-mult`, `-basis`, `-basis-light`, `-cartesian` / `-spherical`, `-x2c`, `-x2c-atomic`, `-xc`, `-grid-level`, `-ecp`. You may leave them out. If you give one and it disagrees with the file, the run stops and names the mismatch, which catches a stale or wrong checkpoint. An `-xyz` given with `-read-chk` is compared with the stored geometry through the interatomic distances (same atoms, same order, 0.001 Å).
+
+These flags steer how an SCF converges, so a reprojection ignores them and says so on stderr: `-guess`, `-guessmix`, `-guessmix-angle`, `-guess-triplet`, `-stable`, `-stable-cycles`, `-soscf`, `-no-newton-fallback`, `-newton-conv-tol`, `-max-cycle`, `-basis-dir`, `-no-std-orient`.
+
+Two cautions. Runs of the same molecule and method in one directory share the default name and overwrite each other, so give `-chk` a name when you vary the basis or functional, and always when jobs run at the same time. A wavefunction of one method cannot be read by another driver (a UKS checkpoint by `minpop-uhf`, a restricted one by an unrestricted driver); the error names the right command.
+
+**For specialists.** The checkpoint is a standard PySCF chkfile (HDF5): `mol` (geometry in the frame the analysis used, computational basis, ECP, charge, spin) and `scf` (`e_tot`, `mo_energy`, `mo_occ`, `mo_coeff`). The orbitals are the final ones, after `-stable` and the Newton tightening. MinPop adds one group, `minpop`, with the method, the SCF-defining settings, the original command, and the SCF section of the report as it was printed. A reprojection prints that stored section verbatim, followed by a fresh analysis. Its report and JSON record therefore equal those of a direct run with the same minimal basis, apart from the command line and the `Checkpoint file:` line (`source.command_line`, `source.checkpoint`, `source.sha256` in the record). The projection needs only the occupied orbitals, the two overlap matrices and the minimal basis; the X2C Hamiltonian and the DFT grid are not rebuilt.
+
+Plain PySCF chkfiles (`mf.chkfile = "run.chk"` in your own script) work as well. They hold no `minpop` group, so the report header is rebuilt from the molecule, `-basis`, `-xc` and `-x2c` only label it, and the geometry is used in the frame it was stored in (no standard reorientation). Restricted orbitals go to `minpop-rohf` and unrestricted ones to `minpop-uhf` unless you pass `-method` or `-xc`.
+
+In Python the four `run_*_from_xyz` functions take `chk=` and `read_chk=`, and `minpop.minpop_chk` exposes `save`, `load`, `restore` and `describe`:
+
+```python
+from minpop import run_uks_from_xyz
+run_uks_from_xyz("rhco3.xyz", multiplicity=2, basis="def2-tzvpp", chk="rhco3.chk")
+res = run_uks_from_xyz(read_chk="rhco3.chk", minimal_basis="minao", verbose=False)
+```
+
+The GVB-PP driver does not write checkpoints yet.
+
+---
+
+## 12. Python API
 
 ```python
 from minpop import run_uks_from_xyz, bond_components
@@ -322,7 +375,7 @@ Return dictionaries hold `dm_alpha`, `dm_beta`, `dm_total`, `dm_spin`, `pop_tota
 
 ---
 
-## 12. Validation
+## 13. Validation
 
 - **STO-3G path versus Gaussian 16.** Mulliken charges, spin populations, gross orbital populations and condensed matrices match to six decimals for CH (quartet), CH₂ (triplet, UHF and ROHF), CHCl₃, TiO₂ (UHF and ROHF) and SnH₄; the Gaussian and PySCF reports are in `validation/`. Version 2 leaves this path byte-identical to 1.x apart from the added completeness line. Use Gaussian's standard-orientation geometry when comparing orbital-resolved matrices.
 - **ANO-RCC truncations.** Sliced coefficients equal Basis Set Exchange's ano-rcc-mb/vdzp/vtzp/vqzp to 10⁻¹² for H, C, Si, Fe, Pt, U (`python minpop/basis_sets/anorcc_basis_pyscf.py` repeats the check with basis-set-exchange installed).
@@ -335,7 +388,7 @@ Worked outputs for Pt₂, PtO, PtH (PBE) and CrH, CrO, Cr₂ (GVB-PP, RHF, PBE) 
 
 ---
 
-## 13. References
+## 14. References
 
 1. Montgomery Jr., J. A.; Frisch, M. J.; Ochterski, J. W.; Petersson, G. A. *J. Chem. Phys.* **1999**, *110*, 2822. [10.1063/1.477924](https://doi.org/10.1063/1.477924)
 2. Montgomery Jr., J. A.; Frisch, M. J.; Ochterski, J. W.; Petersson, G. A. *J. Chem. Phys.* **2000**, *112*, 6532. [10.1063/1.481224](https://doi.org/10.1063/1.481224)

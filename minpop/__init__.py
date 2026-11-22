@@ -11,11 +11,12 @@ Modules:
     minpop.bond_symmetry                  sigma/pi/delta/phi decomposition of bond populations
     minpop.basis_sets.anorcc_basis_pyscf   ANO-RCC-MB / VDZP / VTZP / VQZP
     minpop.minpop_json_csv           JSON / CSV export of finished reports
+    minpop.minpop_chk                checkpoint files: keep the SCF, reproject it later
 
 The heavy modules are imported lazily; `import minpop` is cheap.
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 __all__ = ["run_rohf_from_xyz", "run_uhf_from_xyz", "run_rks_from_xyz",
            "run_uks_from_xyz", "run_gvbpp_from_xyz", "bond_components",
            "class_matrices", "__version__"]

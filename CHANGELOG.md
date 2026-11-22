@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.2.0 (2026-11-22)
+
+Added
+- Checkpoint files (`minpop/minpop_chk.py`). The ROHF, UHF, RKS and UKS drivers now obtain their wavefunction through this module. Each run writes the converged SCF to a PySCF chkfile (`-chk FILE`; default `<xyz name>_<method>.chk`; `-no-chk` to skip). `-read-chk FILE` skips the SCF and projects the stored wavefunction, so one SCF serves any number of minimal bases. `-xyz` is optional with `-read-chk`.
+- `minpop-chk FILE ...`: reprojects a checkpoint with the driver that wrote it; `-info` prints what the file holds; `-method` selects the driver for a plain PySCF chkfile.
+- A reprojection prints the stored SCF section verbatim, so its report and JSON record match a direct run with the same minimal basis apart from the command line and the `Checkpoint file:` line.
+- Guards: SCF-defining flags (`-charge`, `-mult`, `-basis`, `-basis-light`, `-cartesian`, `-x2c`, `-x2c-atomic`, `-xc`, `-grid-level`, `-ecp`) and an `-xyz` given with `-read-chk` must agree with the file; a wavefunction of another method is refused with the right command named.
+- JSON schema 1.3: `source.checkpoint = {path, mode}` (`written` or `read`), `null` without a checkpoint. Additive over 1.2.
+- `run_*_from_xyz(..., chk=, read_chk=)` in the Python API.
+
+Changed
+- `minpop_rks.py`: the aufbau check uses O(n^3) matrix products instead of an O(n^5) einsum.
+- `minpop_uhf.py`, `minpop_uks.py`: `-stable` follows the lowest mode of the orbital-rotation Hessian in both directions and keeps the lower solution; it now finds the spin-symmetry-breaking instability of a closed-shell start.
+
 ## 2.1.0 (2026-11-13)
 
 Added

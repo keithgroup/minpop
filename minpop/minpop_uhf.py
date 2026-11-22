@@ -69,7 +69,9 @@ for _d in (_HERE, os.path.join(_HERE, "basis_sets")):
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
-__version__ = "1.1.0"
+import minpop_chk as _chk    # checkpoint files: write, read, reproject
+
+__version__ = "1.2.0"
 __author__ = "Barbaro Zulueta"
 __all__ = ["minpop_uhf", "run_uhf_from_xyz"]
 
@@ -2243,7 +2245,7 @@ def _stabilize_uhf(mf, max_cycles=10, verbose=False,
         f"open-shell singlet, or raise -stable-cycles.")
 
 
-def run_uhf_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
+def _scf_uhf_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
                      ecp=None, verbose=True, basis_dir=None,
                      standard_orientation=True,
                      azimuthal_gauge=True,
@@ -2457,8 +2459,46 @@ def run_uhf_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
     if verbose:
         print()
     
-    return minpop_uhf(mf, verbose=verbose, azimuthal_gauge=azimuthal_gauge,
-                      minimal_basis=minimal_basis)
+    return mf
+
+
+def run_uhf_from_xyz(xyz_file=None, *args, chk=None, read_chk=None,
+                     explicit=None, **kwargs):
+    """
+    Run the UHF SCF and the MinPop analysis from an XYZ file, or reproject a
+    stored SCF. Takes every argument of _scf_uhf_from_xyz (charge,
+    multiplicity, basis, minimal_basis, ...), plus:
+
+    chk : str, optional
+        Write the converged SCF to this PySCF checkpoint file.
+    read_chk : str, optional
+        Skip the SCF and project the wavefunction stored in this checkpoint.
+        xyz_file is then optional (when given it is checked against the
+        stored geometry) and only minimal_basis, azimuthal_gauge and verbose
+        still matter.
+    explicit : dict, optional
+        SCF-defining settings the caller insists on (command line only); a
+        checkpoint that disagrees with them is refused.
+
+    The wavefunction comes from minpop_chk.run_with_checkpoint, which either
+    calls _scf_uhf_from_xyz or reads the checkpoint.
+
+    Returns
+    -------
+    results : dict
+        MinPop analysis results (see minpop_uhf)
+    """
+    import inspect
+    if xyz_file is None and not read_chk:
+        raise ValueError("xyz_file is required unless read_chk is given")
+    bound = inspect.signature(_scf_uhf_from_xyz).bind(xyz_file, *args, **kwargs)
+    bound.apply_defaults()
+    kw = dict(bound.arguments)
+    return _chk.run_with_checkpoint(
+        "UHF", _scf_uhf_from_xyz, minpop_uhf, kw,
+        dict(verbose=kw["verbose"], azimuthal_gauge=kw["azimuthal_gauge"],
+             minimal_basis=kw["minimal_basis"]),
+        chk=chk, read_chk=read_chk, explicit=explicit, read_xyz=_read_xyz)
 
 
 # =============================================================================
@@ -2583,6 +2623,8 @@ def main():
         epilog="""
 Examples:
   python minpop_uhf.py -xyz ch2.xyz -charge 0 -mult 3
+  python minpop_uhf.py -xyz ch2.xyz -mult 3 -chk ch2.chk          # keep the SCF
+  python minpop_uhf.py -read-chk ch2.chk -minimal-basis minao     # reproject, no SCF
   python minpop_uhf.py -xyz radical.xyz -mult 2 -basis cc-pVDZ
   python minpop_uhf.py -xyz snh4.xyz -basis def2-TZVPP     # Auto-detects ECP
   python minpop_uhf.py -xyz ch2.xyz -mult 3 -basis cbsb7   # Gaussian CBSB7 (H-Ar)
@@ -2607,8 +2649,9 @@ Notes:
   directory, or next to this script.
 """
     )
-    parser.add_argument("-xyz", required=True, dest="xyz_file",
-                        help="Path to XYZ geometry file")
+    parser.add_argument("-xyz", dest="xyz_file", default=None,
+                        help="Path to XYZ geometry file (required unless "
+                             "-read-chk is given)")
     parser.add_argument("-charge", type=int, default=0,
                         help="Molecular charge (default: 0)")
     parser.add_argument("-mult", type=int, default=1,
@@ -2752,6 +2795,7 @@ Notes:
                              "orbitals are mixed, so it selects the "
                              "broken-symmetry basin; 'huckel' is worth trying "
                              "when a minao-seeded mix fails to converge.")
+    _chk.add_arguments(parser)
     parser.add_argument("-json", dest="json_path", metavar="PATH",
                         default=None,
                         help="Also serialize this run to a JSON record via "
@@ -2777,6 +2821,8 @@ Notes:
                         version=f"%(prog)s {__version__}")
     
     args = parser.parse_args()
+    chk_path, read_chk, chk_explicit, scf_xyz = _chk.resolve_cli(
+        parser, args, "UHF")
     global LABEL_STYLE, BOND_SYMMETRY, BOND_SYMMETRY_SHELLS, MBS_LIGHT_MAX_Z
     MBS_LIGHT_MAX_Z = args.light_max_z
     LABEL_STYLE = args.label_style
@@ -2809,7 +2855,9 @@ Notes:
                       + " ".join(shlex.quote(a) for a in sys.argv))
 
             run_uhf_from_xyz(
-                args.xyz_file,
+                scf_xyz,
+                chk=chk_path, read_chk=read_chk,
+                explicit=chk_explicit,
                 charge=args.charge,
                 multiplicity=args.mult,
                 basis=args.basis,
@@ -2835,7 +2883,7 @@ Notes:
             light_max_z=args.light_max_z,
             minimal_basis=args.minimal_basis
             )
-        except MinPopSCFError as exc:
+        except (MinPopSCFError, _chk.CheckpointError) as exc:
             failure = exc
 
 

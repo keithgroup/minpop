@@ -33,9 +33,8 @@
 #   7 vs 1, 8 vs 2   AE vs ECP on Rh, matched shells (0.25 e on Rh, 0.05 on σ)
 #   4/5 vs 9, 10, 11 computational basis           (converged: < 0.02 e everywhere)
 #
-# Recommended production settings:
-# x2c-tzvppall + 6-31G*, -x2c-atomic, -minimal-basis sto-3g-ano-occ (for small organometallic/inorganic clusters with one or more metals)
-# def2-TZVPP (with SD ECP), -minimal-basis sto-3g+minao (for larger organometallic/inorganic clusters with one or more metals)
+# Recommended production settings (see summary): x2c-tzvppall + 6-31G*,
+# -x2c-atomic, -minimal-basis sto-3g-ano-occ.
 
 set -u
 export PYTHONIOENCODING=utf-8

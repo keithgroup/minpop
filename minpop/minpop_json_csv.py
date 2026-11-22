@@ -33,7 +33,7 @@ Every quantity carries its own shape and units, and matrices are stored whole
 record round-trips to the exact float values Gaussian printed.
 
     {
-      "schema": "minpop-record", "schema_version": "1.2",
+      "schema": "minpop-record", "schema_version": "1.3",
       "source":   {file, sha256, code, parsed_utc},
       "system":   {id, reaction, point, charge, multiplicity, natoms, nelectrons},
       "method":   {name, basis, guess_mix, stable_opt},
@@ -61,6 +61,9 @@ record round-trips to the exact float values Gaussian printed.
 
 Schema history
 --------------
+1.3  source.checkpoint = {path, mode} | null. mode is "written" (the run did the
+     SCF and stored it) or "read" (a reprojection: the SCF section of the report
+     is the stored one and no SCF was run). Additive.
 1.2  Everything the report prints is now in the record. Added: source.command_line;
      method.{label, xc, grid_level, basis_full, basis_heavy, basis_light, spherical,
      ecp, hamiltonian, minimal_basis}; scf.{s2, two_s_plus_one, n_doubly, n_singly};
@@ -100,7 +103,7 @@ from pathlib import Path
 import numpy as np
 
 SCHEMA = "minpop-record"
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 
 _SYMBOLS = ("H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn "
             "Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce "
@@ -551,6 +554,14 @@ def parse_method_details(text):
     return d
 
 
+def parse_checkpoint(text):
+    """{'path', 'mode'} from the 'Checkpoint file:' line: mode 'written' for a
+    run that did the SCF and stored it, 'read' for a reprojection of a stored
+    SCF. None when the run used no checkpoint."""
+    m = re.search(r"^Checkpoint file:\s*(.+?)\s*\((written|read)\b", text, re.M)
+    return {"path": m.group(1), "mode": m.group(2)} if m else None
+
+
 def parse_pyscf_s2(text):
     """(<S^2>, 2S+1) from the last PySCF 'converged SCF energy = ... <S^2> = ...' line."""
     m = re.findall(r"<S\^2>\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+2S\+1\s*=\s*"
@@ -843,6 +854,7 @@ def build_record_from_text(text, source=None, xyz_dirs=None,
             "code": _detect_code(text),
             "parsed_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "command_line": cmd.group(1).strip() if cmd else None,
+            "checkpoint": parse_checkpoint(text),      # schema 1.3
         },
         "system": {
             "id": sysid,

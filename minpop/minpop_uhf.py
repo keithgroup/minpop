@@ -71,7 +71,7 @@ for _d in (_HERE, os.path.join(_HERE, "basis_sets")):
 
 import minpop_chk as _chk    # checkpoint files: write, read, reproject
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "Barbaro Zulueta"
 __all__ = ["minpop_uhf", "run_uhf_from_xyz"]
 
@@ -2257,7 +2257,8 @@ def _scf_uhf_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
                      newton_conv_tol=1e-11,
                      cartesian=False, x2c=False, basis_light=None, light_max_z=18,
                       x2c_atomic=False,
-                     minimal_basis='sto-3g'):
+                     minimal_basis='sto-3g',
+                      guess_chk=None):
     """
     Run UHF calculation and MinPop analysis from an XYZ file.
     
@@ -2386,7 +2387,10 @@ def _scf_uhf_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
 
     # Optional broken-symmetry HOMO-LUMO mixed initial guess (Gaussian Guess=Mix)
     dm0 = None
-    if guess_triplet:
+    if guess_chk:
+        # start from a stored wavefunction (any basis, method or frame)
+        dm0 = _chk.guess_density(guess_chk, mol, "UHF", verbose=verbose)
+    elif guess_triplet:
         dm0 = _init_guess_triplet(mol, mode=guess_triplet,
                                   verbose=verbose)
     elif guessmix:
@@ -2407,7 +2411,7 @@ def _scf_uhf_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
         dm0 = np.array([_dm_restricted * 0.5, _dm_restricted * 0.5])
     elif guess != 'minao':
         dm0 = mf.get_init_guess(key=guess)
-    if verbose and guess != 'minao':
+    if verbose and guess != 'minao' and not guess_chk:
         print(f"Initial guess: {guess}")
     if soscf:
         # Second-order from the outset instead of only as a rescue. Costs more
@@ -2625,6 +2629,7 @@ Examples:
   python minpop_uhf.py -xyz ch2.xyz -charge 0 -mult 3
   python minpop_uhf.py -xyz ch2.xyz -mult 3 -chk ch2.chk          # keep the SCF
   python minpop_uhf.py -read-chk ch2.chk -minimal-basis minao     # reproject, no SCF
+  python minpop_uhf.py -xyz ch2.xyz -mult 3 -basis cc-pVTZ -guess-chk ch2.chk   # SCF from stored orbitals
   python minpop_uhf.py -xyz radical.xyz -mult 2 -basis cc-pVDZ
   python minpop_uhf.py -xyz snh4.xyz -basis def2-TZVPP     # Auto-detects ECP
   python minpop_uhf.py -xyz ch2.xyz -mult 3 -basis cbsb7   # Gaussian CBSB7 (H-Ar)
@@ -2858,6 +2863,7 @@ Notes:
                 scf_xyz,
                 chk=chk_path, read_chk=read_chk,
                 explicit=chk_explicit,
+                guess_chk=args.guess_chk,
                 charge=args.charge,
                 multiplicity=args.mult,
                 basis=args.basis,

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.0 (2026-11-22)
+
+Added
+- `-guess-chk FILE` on the ROHF, UHF, RKS and UKS drivers: run the SCF from the wavefunction in a checkpoint (`minpop_chk.guess_density`). The file may differ in basis, method, functional, restricted/unrestricted form and frame; atoms, charge and multiplicity must match. Stored occupied orbitals are rotated (spherical and Cartesian shells), projected and orthonormalized as needed. Replaces `-guess`, `-guessmix`, `-guess-triplet` for that run.
+- The report prints `Initial guess: checkpoint file ...`; `minpop-chk FILE -info` shows which file an SCF was started from.
+- JSON schema 1.4: `source.guess_checkpoint`. Additive over 1.3.
+- `run_*_from_xyz(..., guess_chk=)` in the Python API.
+
 ## 2.2.0 (2026-11-22)
 
 Added

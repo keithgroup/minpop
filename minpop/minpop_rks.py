@@ -69,7 +69,7 @@ for _d in (_HERE, os.path.join(_HERE, "basis_sets")):
 
 import minpop_chk as _chk    # checkpoint files: write, read, reproject
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "Barbaro Zulueta"
 __all__ = ["minpop_rks", "run_rks_from_xyz"]
 
@@ -1765,7 +1765,8 @@ def _scf_rks_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
                       cartesian=False, x2c=False, basis_light=None, light_max_z=18,
                       x2c_atomic=False,
                       minimal_basis='sto-3g',
-                     xc='pbe', grid_level=None):
+                     xc='pbe', grid_level=None,
+                      guess_chk=None):
     """
     Run ROHF calculation and MinPop analysis from an XYZ file.
     
@@ -1905,9 +1906,13 @@ def _scf_rks_from_xyz(xyz_file, charge=0, multiplicity=1, basis='6-31+G',
         _conv, _mx = mf.conv_tol, mf.max_cycle
         mf = mf.newton()
         mf.conv_tol, mf.max_cycle = _conv, _mx
-    dm0 = mf.get_init_guess(key=guess) if guess != 'minao' else None
-    if verbose and guess != 'minao':
-        print(f"Initial guess: {guess}")
+    if guess_chk:
+        # start from a stored wavefunction (any basis, method or frame)
+        dm0 = _chk.guess_density(guess_chk, mol, "RKS", verbose=verbose)
+    else:
+        dm0 = mf.get_init_guess(key=guess) if guess != 'minao' else None
+        if verbose and guess != 'minao':
+            print(f"Initial guess: {guess}")
     mf.kernel(dm0=dm0)
     if not mf.converged and not soscf:
         # DIIS oscillates when the HOMO-LUMO gap is small, which a pure GGA
@@ -2104,6 +2109,7 @@ Examples:
   python minpop_rks.py -xyz ch2.xyz -charge 0 -mult 3
   python minpop_rks.py -xyz ch2.xyz -mult 3 -chk ch2.chk          # keep the SCF
   python minpop_rks.py -read-chk ch2.chk -minimal-basis minao     # reproject, no SCF
+  python minpop_rks.py -xyz ch2.xyz -mult 3 -basis cc-pVTZ -guess-chk ch2.chk   # SCF from stored orbitals
   python minpop_rks.py -xyz radical.xyz -mult 2 -basis cc-pVDZ
   python minpop_rks.py -xyz snh4.xyz -basis def2-TZVPP     # Auto-detects ECP
   python minpop_rks.py -xyz ch2.xyz -mult 3 -basis cbsb7   # Gaussian CBSB7 (H-Ar)
@@ -2277,6 +2283,7 @@ Notes:
                 scf_xyz,
                 chk=chk_path, read_chk=read_chk,
                 explicit=chk_explicit,
+                guess_chk=args.guess_chk,
                 charge=args.charge,
                 multiplicity=args.mult,
                 basis=args.basis,

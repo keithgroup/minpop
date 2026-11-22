@@ -21,6 +21,12 @@ minpop-chk pth.chk -minimal-basis ano-rcc-mb -symmetry \
 minpop-chk pth.chk -minimal-basis ano-rcc-mb-occ -symmetry-shells \
            -json pth_anorccmb_occ.json > pth_anorccmb_occ.out 2>&1
 
+# 4. A new SCF started from the stored one: larger Pt basis, same state.
+minpop-uks -xyz $XYZ -mult 2 -xc pbe -basis ano-rcc-vtzp -basis-light "6-31G*" \
+           -x2c-atomic -minimal-basis sto-3g-ano -guess-chk pth.chk -chk pth_vtzp.chk \
+           > pth_vtzp.out 2>&1
+grep "Initial guess" pth_vtzp.out
+
 for f in pth_sto3g_ano pth_sto3g_ano_occ pth_anorccmb pth_anorccmb_occ; do
   echo "== $f"
   grep -m1 "Checkpoint file:" $f.out

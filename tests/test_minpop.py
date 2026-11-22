@@ -135,7 +135,7 @@ def _run_json(script, tmp_path, *args):
 def test_json_uhf_matches_report(tmp_path):
     text, rec = _run_json("minpop_uhf.py", tmp_path, "-xyz", f"{XYZ}/ch2.xyz", "-mult", "3",
                           "-basis", "6-31G", "-symmetry-shells")
-    assert rec["schema_version"] == "1.3"
+    assert rec["schema_version"] == "1.4"
     assert rec["method"]["name"] == "uhf" and rec["method"]["label"] == "UHF"
     assert rec["method"]["basis_full"] == "6-31G" and rec["method"]["spherical"] is True
     assert rec["method"]["minimal_basis"].startswith("STO-3G")
@@ -286,3 +286,60 @@ def test_chk_plain_pyscf_file(tmp_path):
     text = run("minpop_chk.py", chk)
     assert "rebuilt from the file" in text
     assert abs(charges(text)[0, 0] - O_CHARGE_H2O_631G) < 2e-3
+
+
+def _scf_energy(text):
+    return float(re.findall(r"converged SCF energy = (-?\d+\.\d+)", text)[-1])
+
+
+def test_guess_chk_carries_a_broken_symmetry_state(tmp_path):
+    xyz = tmp_path / "h2.xyz"
+    xyz.write_text("2\nstretched\nH 0 0 0\nH 0 0 2.0\n")
+    chk = str(tmp_path / "bs.chk")
+    run("minpop_uks.py", "-xyz", str(xyz), "-basis", "6-31G*", "-guessmix", "-stable",
+        "-chk", chk)
+    plain = run("minpop_uks.py", "-xyz", str(xyz), "-basis", "cc-pVDZ", "-no-chk")
+    seeded = run("minpop_uks.py", "-xyz", str(xyz), "-basis", "cc-pVDZ", "-no-chk",
+                 "-guess-chk", chk)
+    assert "Initial guess: checkpoint file" in seeded
+    assert "projected onto the current basis" in seeded
+    assert abs(charges(plain)[0, 1]) < 1e-6          # restricted solution
+    assert abs(charges(seeded)[0, 1]) > 0.5          # broken symmetry kept
+    assert _scf_energy(seeded) < _scf_energy(plain) - 1e-3
+
+
+def test_guess_chk_other_method_same_answer(tmp_path):
+    chk = str(tmp_path / "hf.chk")
+    run("minpop_rohf.py", "-xyz", f"{XYZ}/ch2.xyz", "-mult", "3", "-basis", "6-31G",
+        "-chk", chk)
+    base = ("-xyz", f"{XYZ}/ch2.xyz", "-mult", "3", "-basis", "6-31G*", "-no-chk")
+    a = run("minpop_uks.py", *base)
+    b = run("minpop_uks.py", *base, "-guess-chk", chk)
+    assert abs(_scf_energy(a) - _scf_energy(b)) < 1e-7
+    assert np.allclose(charges(a), charges(b), atol=1e-5)
+    err = run("minpop_uks.py", "-xyz", f"{XYZ}/ch2.xyz", "-mult", "1", "-guess-chk", chk,
+              ok=False)
+    assert "multiplicity" in err
+
+
+def test_guess_chk_rotated_frame():
+    """Stored orbitals rotated into another frame reproduce the energy,
+    spherical and Cartesian."""
+    sys.path.insert(0, PKG)
+    import minpop_chk
+    from pyscf import gto, scf
+    th = 0.6
+    R = np.array([[np.cos(th), -np.sin(th), 0], [np.sin(th), np.cos(th), 0], [0, 0, 1]]) @ \
+        np.array([[1, 0, 0], [0, np.cos(1.1), -np.sin(1.1)], [0, np.sin(1.1), np.cos(1.1)]])
+    xyz = np.array([[0, 0, 0.1], [0, 0.8, -0.5], [0.3, -0.7, -0.4]])
+    for cart in (False, True):
+        mk = lambda x: gto.M(atom=[["O", x[0]], ["H", x[1]], ["H", x[2]]], basis="6-31g*",
+                             charge=1, spin=1, cart=cart, verbose=0)
+        chk = os.path.join(WORK, f"rot{int(cart)}.chk")
+        mf = scf.UHF(mk(xyz))
+        mf.chkfile = chk
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        mol2 = mk(xyz @ R.T + 0.4)
+        dm = minpop_chk.guess_density(chk, mol2, "UHF", verbose=False)
+        assert abs(scf.UHF(mol2).energy_tot(dm=dm) - mf.e_tot) < 1e-8

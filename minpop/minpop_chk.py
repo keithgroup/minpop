@@ -9,6 +9,7 @@ obtain their wavefunction through this module:
     run_with_checkpoint()   run the SCF and write a checkpoint, or read a
                             checkpoint and skip the SCF; then run the analysis
     save() / restore()      write / read one checkpoint
+    guess_density()         a checkpoint as the initial guess of a new SCF
     main()                  `minpop-chk FILE ...`: reproject a checkpoint with
                             whichever driver wrote it, or print what it holds
 
@@ -34,6 +35,10 @@ Command line
     minpop-uks -read-chk rh.chk -minimal-basis minao -symmetry -json rh_minao.json
     minpop-chk rh.chk -info
     minpop-chk rh.chk -minimal-basis sto-3g-ano-occ -symmetry-shells
+    minpop-uks -xyz rh.xyz -mult 2 -basis def2-qzvpp -guess-chk rh.chk -chk rh_qz.chk
+
+-read-chk runs no SCF: it projects the stored orbitals. -guess-chk runs the
+SCF and only starts it from the stored orbitals (guess_density()).
 """
 
 import argparse
@@ -47,7 +52,7 @@ import sys
 
 import numpy as np
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 FORMAT_VERSION = 1
 GROUP = "minpop"
@@ -73,6 +78,7 @@ SCF_PROCEDURE = {
     "soscf": "-soscf", "newton_fallback": "-no-newton-fallback",
     "newton_conv_tol": "-newton-conv-tol", "max_cycle": "-max-cycle",
     "basis_dir": "-basis-dir", "standard_orientation": "-no-std-orient",
+    "guess_chk": "-guess-chk",
 }
 
 
@@ -227,6 +233,7 @@ def save(mf, path, method, header="", settings=None):
         "xyz_file": str(s.get("xyz_file") or ""),
         "standard_orientation": bool(s.get("standard_orientation", True)),
         "converged": bool(getattr(mf, "converged", True)),
+        "guess_chk": str(s.get("guess_chk") or ""),
         "header": str(header or ""),
         "command_line": "python " + " ".join(shlex.quote(a) for a in sys.argv),
         "created_utc": datetime.datetime.now(datetime.timezone.utc)
@@ -448,6 +455,156 @@ def restore(path, method, verbose=True, explicit=None, labels=None,
 
 
 # --------------------------------------------------------------------------- #
+# A checkpoint as the initial guess of a new SCF (-guess-chk)
+# --------------------------------------------------------------------------- #
+def _align(old, new):
+    """Rigid motion that carries the checkpoint geometry onto the current one.
+    Returns (R, rmsd, moved) with moved = (old - centroid) @ R.T + centroid',
+    all in Bohr. R is a proper rotation (Kabsch)."""
+    co, cn = old.mean(axis=0), new.mean(axis=0)
+    P, Q = old - co, new - cn
+    if len(old) == 1:
+        R = np.eye(3)
+    else:
+        U, _, Vt = np.linalg.svd(P.T @ Q)
+        d = np.sign(np.linalg.det(Vt.T @ U.T)) or 1.0
+        R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+    moved = P @ R.T + cn
+    rmsd = float(np.sqrt(((moved - new) ** 2).sum(axis=1).mean()))
+    return R, rmsd, moved
+
+
+def _cart_rotation(l, R):
+    """Rotation of one Cartesian shell (PySCF order: xx, xy, xz, yy, yz, zz
+    for d). Column k holds the rotated function k in the unrotated ones; the
+    monomials x^a y^b z^c mix among themselves under a rotation, and the
+    matrix follows from their values at a set of points."""
+    pw = [(a, b, l - a - b) for a in range(l, -1, -1) for b in range(l - a, -1, -1)]
+    rng = np.random.default_rng(7)
+    r = rng.standard_normal((4 * len(pw) + 8, 3))
+    val = lambda x: np.array([x[:, 0] ** a * x[:, 1] ** b * x[:, 2] ** c
+                              for a, b, c in pw]).T
+    M, *_ = np.linalg.lstsq(val(r), val(r @ R), rcond=None)
+    return M
+
+
+def _ao_rotation(mol, R):
+    """T with rotated coefficients = T @ coefficients, for atoms moved by
+    new = old @ R.T. Checked against the SCF energy of a rotated molecule."""
+    import scipy.linalg as sl
+    if not mol.cart:
+        if not hasattr(mol, "ao_rotation_matrix"):
+            raise CheckpointError(
+                "this PySCF cannot rotate orbitals (Mole.ao_rotation_matrix is "
+                "missing). Run with -no-std-orient and an -xyz in the "
+                "checkpoint's own frame, or update PySCF.")
+        return np.asarray(mol.ao_rotation_matrix(R)).T
+    blocks, cache = [], {}
+    for i in range(mol.nbas):
+        l = mol.bas_angular(i)
+        if l not in cache:
+            cache[l] = _cart_rotation(l, R)
+        blocks.extend([cache[l]] * mol.bas_nctr(i))
+    return sl.block_diag(*blocks)
+
+
+def guess_density(path, mol, method, verbose=True):
+    """Initial-guess density for a new SCF on `mol` from the wavefunction in
+    the checkpoint `path` (a MinPop checkpoint or a plain PySCF chkfile).
+
+    The stored occupied orbitals are rotated into the current frame when the
+    two geometries differ by a rigid motion, projected onto the current basis
+    when the basis differs, and orthonormalized, so the guess always holds the
+    right number of electrons. Method and functional may differ from the
+    current run; atoms, charge and multiplicity may not.
+
+    Returns the density in the form the driver's SCF takes: (alpha, beta) for
+    ROHF, UHF and UKS, the total density for RKS.
+    """
+    from pyscf import gto
+    from pyscf.scf import addons
+    if method not in METHODS:
+        raise CheckpointError(f"unknown method {method!r}")
+    cmol, rec, meta = load(path)
+    norm = lambda sym: re.sub(r"[^A-Za-z]", "", sym).capitalize()
+    mine = [norm(mol.atom_pure_symbol(i)) for i in range(mol.natm)]
+    theirs = [norm(cmol.atom_pure_symbol(i)) for i in range(cmol.natm)]
+    if mine != theirs:
+        raise CheckpointError(
+            f"-guess-chk {path} holds {' '.join(theirs)} but this run is "
+            f"{' '.join(mine)} (same atoms in the same order are required)")
+    if cmol.charge != mol.charge or cmol.spin != mol.spin:
+        raise CheckpointError(
+            f"-guess-chk {path} has charge {cmol.charge}, multiplicity "
+            f"{cmol.spin + 1}; this run has charge {mol.charge}, multiplicity "
+            f"{mol.spin + 1}")
+
+    c = np.asarray(rec["mo_coeff"])
+    occ = np.asarray(rec["mo_occ"])
+    if c.ndim == 3:
+        orbs = [c[0][:, occ[0] > 0.5], c[1][:, occ[1] > 0.5]]
+    else:
+        orbs = [c[:, occ > 0.5], c[:, occ > 1.5]]
+
+    R, rmsd, moved = _align(cmol.atom_coords(), mol.atom_coords())
+    rotated = abs(R - np.eye(3)).max() > 1e-8
+    if rotated:
+        T = _ao_rotation(cmol, R)
+        orbs = [T @ o for o in orbs]
+    shifted = abs(moved - cmol.atom_coords()).max() > 1e-10
+    if shifted:
+        cmol = cmol.copy()
+        cmol.set_geom_(moved, unit="Bohr")
+    same_basis = (bool(cmol.cart) == bool(mol.cart)
+                  and gto.same_basis_set(cmol, mol)
+                  and cmol.nao_nr() == mol.nao_nr())
+    project = not (same_basis and rmsd < 1e-6)
+
+    S = mol.intor("int1e_ovlp")
+    dms = []
+    for o in orbs:
+        if o.shape[1] == 0:
+            dms.append(np.zeros_like(S))
+            continue
+        if project:
+            o = addons.project_mo_nr2nr(cmol, o, mol)
+        w, v = np.linalg.eigh(o.T @ S @ o)
+        if w.min() < 1e-6:
+            raise CheckpointError(
+                f"-guess-chk {path}: the stored orbitals become linearly "
+                f"dependent in the current basis, so they are no use as a guess")
+        o = o @ (v / np.sqrt(w)) @ v.T
+        dms.append(o @ o.T)
+    dma, dmb = dms
+
+    if verbose:
+        m = meta or {}
+        src = m.get("method") or ("unrestricted" if c.ndim == 3 else "restricted")
+        if m.get("xc"):
+            src += f"/{m['xc']}"
+        basis = m.get("basis") or (cmol.basis if isinstance(cmol.basis, str)
+                                   else "custom basis")
+        if m.get("basis_light"):
+            basis += f" + {m['basis_light']}"
+        steps = []
+        if rotated:
+            steps.append("rotated into the current frame")
+        if project:
+            steps.append("projected onto the current basis"
+                         if rmsd < 1e-6 else
+                         "projected onto the current basis and geometry")
+        how = ", ".join(steps) if steps else "used as stored"
+        print(f"Initial guess: checkpoint file {path} ({src}, {basis}, "
+              f"E = {float(rec['e_tot']):.9f}; {how})")
+        if rmsd > 1e-3:
+            print(f"Initial guess: the checkpoint geometry differs from this "
+                  f"one, RMSD {rmsd * 0.529177210903:.4f} A after alignment")
+    if method == "RKS":
+        return dma + dmb
+    return np.array([dma, dmb])
+
+
+# --------------------------------------------------------------------------- #
 # What the drivers call
 # --------------------------------------------------------------------------- #
 def run_with_checkpoint(method, scf_func, analyse_func, scf_kwargs,
@@ -514,6 +671,20 @@ def add_arguments(parser):
                         "-csv-long) apply as usual. A plain PySCF chkfile "
                         "works too; -basis, -xc and -x2c then only label "
                         "the report.")
+    g.add_argument("-guess-chk", dest="guess_chk", metavar="PATH", default=None,
+                   help="Run the SCF, starting it from the wavefunction in "
+                        "this checkpoint instead of an atomic guess. The "
+                        "file may come from another basis, method or "
+                        "functional (HF orbitals for a DFT run, a small "
+                        "basis for a large one, a restricted solution for "
+                        "an unrestricted run) and from a rotated or "
+                        "slightly different geometry: the orbitals are "
+                        "rotated, projected and orthonormalized as needed. "
+                        "Atoms, charge and multiplicity must match. The "
+                        "SCF, -stable and the analysis run as usual and a "
+                        "new checkpoint is written. Replaces -guess, "
+                        "-guessmix and -guess-triplet. Not the same as "
+                        "-read-chk, which runs no SCF.")
     return g
 
 
@@ -544,6 +715,15 @@ def resolve_cli(parser, args, method, argv=None):
     if not args.xyz_file:
         parser.error("give -xyz FILE (run the SCF) or -read-chk FILE "
                      "(reuse a stored one)")
+    if args.guess_chk:
+        clash = [f for k, f in (("guess", "-guess"), ("guessmix", "-guessmix"),
+                                ("guess_triplet", "-guess-triplet"))
+                 if k in explicit]
+        if clash:
+            parser.error(f"-guess-chk already sets the starting point of the "
+                         f"SCF; drop {', '.join(clash)}")
+        if not os.path.isfile(args.guess_chk):
+            parser.error(f"-guess-chk: file not found: {args.guess_chk}")
     chk = None if args.no_chk else (args.chk or default_path(args.xyz_file, method))
     return chk, None, explicit, args.xyz_file
 
@@ -578,6 +758,8 @@ def describe(path):
         out.append(f"  geometry file           : {m.get('xyz_file') or 'unknown'}"
                    f"  (stored frame: "
                    f"{'Gaussian standard orientation' if m.get('standard_orientation') else 'as given'})")
+        if m.get("guess_chk"):
+            out.append(f"  SCF started from        : {m['guess_chk']}")
         out.append(f"  original command        : {m.get('command_line')}")
     else:
         out.append("  written by MinPop       : no (plain PySCF chkfile; "

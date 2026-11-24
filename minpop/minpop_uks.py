@@ -2177,6 +2177,15 @@ def _internal_stability(mf):
     return cands, False
 
 
+# Following an instability must lower the energy. When the lowest Hessian
+# eigenvalue is negative but reconverging from both directions along its mode
+# returns to the same energy (within this many hartree), the mode leads
+# nowhere lower: on a flat surface, DFT quadrature noise can push a near-zero
+# eigenvalue just below the instability threshold. The solution is then
+# accepted as stable, and the report says so.
+STABLE_SPURIOUS_DE = 1e-7
+
+
 def _stabilize_uhf(mf, max_cycles=10, verbose=False,
                    newton_fallback=True):
     """
@@ -2215,6 +2224,7 @@ def _stabilize_uhf(mf, max_cycles=10, verbose=False,
         # Reconverge from both directions along the unstable mode and keep the
         # lower solution: the sign of an eigenvector is arbitrary, and the two
         # directions can end on different minima.
+        e_before = mf.e_tot
         dms = [mf.make_rdm1(mo1, mf.mo_occ) for mo1 in cands]
         best = None
         for k, dm1 in enumerate(dms):
@@ -2239,6 +2249,16 @@ def _stabilize_uhf(mf, max_cycles=10, verbose=False,
             print(f"Stable=Opt: kept the lower of the two directions "
                   f"(E = {best[0]:.9f})")
         _require_converged(mf, f"Stable=Opt reoptimization (cycle {i})")
+        if best is not None and abs(best[0] - e_before) < STABLE_SPURIOUS_DE:
+            # both directions return to the same energy: the instability is
+            # numerical. (A reoptimization that ends HIGHER is a different
+            # solution, not a confirmation of this one: it goes to the next
+            # cycle and gets its own stability test.)
+            print(f"Stable=Opt: negative mode found, but following it "
+                  f"changed E by {(best[0] - e_before) * 1e6:+.3f} uEh "
+                  f"(|dE| < {STABLE_SPURIOUS_DE * 1e6:.1f}); accepted as stable "
+                  f"after {i} reoptimization(s)")
+            return mf
     raise MinPopSCFError(
         f"still internally unstable after {max_cycles} Stable=Opt cycle(s). "
         f"The SCF is sitting on a saddle point of the orbital-rotation "
